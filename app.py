@@ -1,156 +1,186 @@
-import os
+import io
 import tempfile
-import warnings
-
-import streamlit as st
-import librosa
 import numpy as np
 import pandas as pd
-import speech_recognition as sr
+import streamlit as st
+import whisper
+import parselmouth
+import librosa
 from pydub import AudioSegment
-
-from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import DBSCAN
 from sklearn.ensemble import IsolationForest
-import matplotlib.pyplot as plt
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from matplotlib import pyplot as plt
 
-warnings.filterwarnings("ignore")
+# Page config
+st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Initialize recognizer
-_recognizer = sr.Recognizer()
+# Load Whisper model once
+@st.cache_resource(show_spinner=False)
+def load_whisper(model_name="base"):
+    return whisper.load_model(model_name)
 
-def transcribe(path):
-    # Convert to WAV if needed
-    ext = os.path.splitext(path)[1].lower()
-    if ext != ".wav":
-        wav_path = path.rsplit(".", 1)[0] + ".wav"
-        AudioSegment.from_file(path).export(wav_path, format="wav")
-        path = wav_path
-    with sr.AudioFile(path) as src:
-        audio = _recognizer.record(src)
-    try:
-        return _recognizer.recognize_google(audio).lower()
-    except sr.UnknownValueError:
-        return ""
+# Feature extraction with caching
+@st.cache_data(show_spinner=False)
+def extract_features(audio_bytes: bytes, language: str, model_name: str):
+    # save to a temp .wav
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        seg.export(tmp.name, format="wav")
+        path = tmp.name
 
-# -----------------------------------------------------------------------------
-# Feature extraction function
-def extract_features(path):
-    y, sr_rate = librosa.load(path, sr=None)
-    duration = librosa.get_duration(y=y, sr=sr_rate)
-    intervals = librosa.effects.split(y, top_db=30)
-    num_pauses = len(intervals) - 1
-    total_pauses = duration - sum((e - s) / sr_rate for s, e in intervals)
-    # Pitch variability via pyin
-    f0, _, _ = librosa.pyin(y,
-                             fmin=librosa.note_to_hz("C2"),
-                             fmax=librosa.note_to_hz("C7"))
-    pitch_var = float(np.nanstd(f0))
+    # ASR with Whisper
+    model = load_whisper(model_name)
+    res = model.transcribe(path, language=language)
+    transcript = res["text"].strip()
 
-    transcript = transcribe(path)
-    words = transcript.split()
-    hesitations = sum(words.count(h) for h in ("um", "uh", "er", "ah"))
-    speech_rate = len(words) / duration if duration > 0 else 0
+    # Parselmouth for jitter/shimmer/pitch
+    snd = parselmouth.Sound(path)
+    pitch = snd.to_pitch()
+    pp = parselmouth.praat.call(snd, "To PointProcess (periodic, cc)", 75, 500)
+    jitter = parselmouth.praat.call(pp, "Get jitter (local)", 0.0, 0.02, 1.3)
+    shimmer = parselmouth.praat.call(pp, "Get shimmer (local)", 0.0, 0.02, 1.3, 1.6)
+    freq = pitch.selected_array["frequency"]
+    pitch_mean, pitch_std = np.nanmean(freq), np.nanstd(freq)
 
-    return {
-        "filename": os.path.basename(path),
+    # Pause detection & MFCCs
+    y, sr = librosa.load(path, sr=None)
+    intervals = librosa.effects.split(y, top_db=25)
+    speech_dur = sum((e - s) for s, e in intervals) / sr
+    total_dur = len(y) / sr
+    total_pause = total_dur - speech_dur
+    num_pauses = max(len(intervals) - 1, 0)
+    mfcc = librosa.feature.mfcc(y, sr=sr, n_mfcc=13)
+    mfcc_means = mfcc.mean(axis=1)
+    mfcc_stds = mfcc.std(axis=1)
+
+    feats = {
+        "filename": tmp.name.split("/")[-1],
         "transcript": transcript,
+        "total_duration": total_dur,
+        "total_pause": total_pause,
         "num_pauses": num_pauses,
-        "total_pause_duration": total_pauses,
-        "speech_rate": speech_rate,
-        "hesitation_count": hesitations,
-        "pitch_variability": pitch_var,
+        "jitter": jitter,
+        "shimmer": shimmer,
+        "pitch_mean": pitch_mean,
+        "pitch_std": pitch_std,
     }
+    # add mfcc stats
+    for i in range(13):
+        feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
+        feats[f"mfcc_{i+1}_std"] = float(mfcc_stds[i])
+    return feats
 
-# -----------------------------------------------------------------------------
-# Anomaly detection
-def detect_anomalies(df, eps=1.0, contamination=0.2):
-    feature_cols = [
-        "num_pauses",
-        "total_pause_duration",
-        "speech_rate",
-        "hesitation_count",
-        "pitch_variability",
-    ]
-    X = df[feature_cols].fillna(0).values
-    X_scaled = StandardScaler().fit_transform(X)
-
-    db = DBSCAN(eps=eps, min_samples=2).fit(X_scaled)
-    df["dbscan_outlier"] = db.labels_ == -1
-
-    iso = IsolationForest(contamination=contamination, random_state=42).fit(X_scaled)
-    df["iforest_anomaly"] = iso.predict(X_scaled) == -1
-
+# Clustering + risk scoring
+@st.cache_data(show_spinner=False)
+def score_df(df: pd.DataFrame) -> pd.DataFrame:
+    X = df[["total_pause","num_pauses","jitter","shimmer","pitch_std"]]
+    db = DBSCAN(eps=0.5, min_samples=2).fit(X)
+    iso = IsolationForest(contamination=0.1).fit(X)
+    df["dbscan_label"] = db.labels_
+    df["iso_score"] = iso.decision_function(X)
+    # weighted risk composite (0–100)
+    w_pause, w_j, w_s, w_iso = 0.4, 0.2, 0.2, 0.2
+    r = (
+        (df.total_pause/df.total_pause.max())*w_pause +
+        (df.jitter/df.jitter.max())*w_j +
+        (df.shimmer/df.shimmer.max())*w_s +
+        (1 - (df.iso_score/df.iso_score.max()))*w_iso
+    )
+    df["risk_score"] = (r*100).clip(0,100).round(1)
     return df
 
-# -----------------------------------------------------------------------------
-# Streamlit app layout
-st.title("MemoTag Cognitive Decline Detection App")
-st.markdown(
-    "Upload one or multiple audio files (wav, mp3, m4a) to analyze for cognitive decline indicators."
-)
+# Build a one‑page PDF report
+def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    w, h = letter
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(30, h-30, "MemoTag Cognitive Decline Report")
+    text = c.beginText(30, h-60)
+    text.setFont("Helvetica", 10)
+    row = df.iloc[0]
+    for k in ["filename","total_pause","num_pauses","jitter","shimmer","pitch_std","risk_score"]:
+        text.textLine(f"{k}: {row[k]}")
+    c.drawText(text)
+    # embed chart
+    img = io.BytesIO()
+    fig.savefig(img, format="PNG", bbox_inches="tight")
+    img.seek(0)
+    c.drawImage(ImageReader(img), 30, h-300, width=550, preserveAspectRatio=True)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf
 
-uploaded_files = st.file_uploader(
-    "Choose audio files", type=["wav", "mp3", "m4a"], accept_multiple_files=True
-)
+# --- UI ---
+st.title("📋 MemoTag Cognitive Decline Detection")
 
-if uploaded_files:
-    temp_dir = tempfile.mkdtemp()
-    records = []
-    for uploaded in uploaded_files:
-        tmp_path = os.path.join(temp_dir, uploaded.name)
-        with open(tmp_path, "wb") as f:
-            f.write(uploaded.getbuffer())
-        records.append(extract_features(tmp_path))
+# Sidebar settings
+st.sidebar.header("Settings")
+language = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
+model_name = st.sidebar.selectbox("Whisper Model", ["tiny","base","small","medium","large"], index=1)
+if st.sidebar.button("Clear Cache"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
 
-    df = pd.DataFrame(records).set_index("filename")
-    df = detect_anomalies(df)
+# File uploader
+files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
+if not files:
+    st.info("Upload at least one audio file to begin.")
+    st.stop()
 
-    st.subheader("Feature Table with Anomaly Flags")
-    st.dataframe(df)
+# Extract & score
+records = []
+for f in files:
+    with st.spinner(f"Processing {f.name}…"):
+        feats = extract_features(f.read(), language, model_name)
+    feats["filename"] = f.name
+    records.append(feats)
 
-    # Plot: Pause Duration Distribution
-    st.subheader("Pause Duration Distribution")
-    fig1, ax1 = plt.subplots()
-    ax1.hist(df["total_pause_duration"], bins=5)
-    ax1.set_xlabel("Pause Duration (s)")
-    ax1.set_ylabel("Frequency")
-    st.pyplot(fig1)
+df = pd.DataFrame(records)
+df = score_df(df)
 
-    # Plot: Speech Rate per Clip
-    st.subheader("Speech Rate per Clip")
-    fig2, ax2 = plt.subplots()
-    df["speech_rate"].plot.bar(ax=ax2)
-    ax2.set_ylabel("Words/sec")
-    st.pyplot(fig2)
+# Audio playback
+st.audio(files[0].read(), format="audio/wav")
 
-    # Plot: Pitch Variability vs Pause Duration
-    st.subheader("Pitch Variability vs Pause Duration")
-    fig3, ax3 = plt.subplots()
-    ax3.scatter(df["total_pause_duration"], df["pitch_variability"])
-    ax3.set_xlabel("Pause Duration (s)")
-    ax3.set_ylabel("Pitch Variability (Hz)")
-    st.pyplot(fig3)
+# Feature table
+st.subheader("🔍 Extracted Features & Scores")
+st.dataframe(df, use_container_width=True)
 
-    # Executive Summary
-    st.subheader("Executive Summary Report")
-    st.markdown(
-        """
-**Most Insightful Features:**
-- **Total Pause Duration:** Longer silences often indicate word-finding difficulty.
-- **Pitch Variability:** Reduced or erratic pitch range may reflect cognitive stress.
+# Scatter plot
+st.subheader("🗺️ Pause vs. Risk Score")
+fig, ax = plt.subplots()
+ax.scatter(df.total_pause, df.risk_score, s=60, edgecolor="k", alpha=0.7)
+ax.set_xlabel("Total Pause Duration (s)")
+ax.set_ylabel("Risk Score (0–100)")
+st.pyplot(fig)
 
-**Modeling Approach:**
-- **DBSCAN** for clustering speech profiles and flagging low-density outliers.
-- **Isolation Forest** for anomaly scoring in high-dimensional feature space.
+# CSV download
+csv = df.to_csv(index=False).encode("utf-8")
+st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 
-**Next Steps:**
-1. Increase sample size (10+ clips) for robust clustering.
-2. Implement semantic recall checks via embeddings.
-3. Validate thresholds with a neurologist.
-4. Deploy as an API endpoint for real-time risk scoring.
-"""
-    )
-else:
-    st.info("Please upload at least one audio file to begin analysis.")
+# PDF download
+pdf_buf = make_pdf(df, fig)
+st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
+
+# Executive summary
+st.subheader("📝 Executive Summary")
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
+    st.markdown(f"- **Jitter:** {df.jitter.iloc[0]:.4f}")
+    st.markdown(f"- **Shimmer:** {df.shimmer.iloc[0]:.4f}")
+with c2:
+    st.markdown("**Cognitive Risk Score**")
+    st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]}</h1>", unsafe_allow_html=True)
+
+st.markdown("""
+**Next Steps**  
+1. Validate thresholds with clinicians  
+2. Deploy as a REST API endpoint  
+3. Integrate longitudinal tracking dashboard  
+4. Optimize Whisper model for CPU/GPU  
+""")

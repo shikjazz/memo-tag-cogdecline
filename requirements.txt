@@ -1,10 +1,11 @@
 streamlit
+whisper
+openai‑whisper
+pydub
 librosa
-soundfile
 numpy
 pandas
-scikit-learn
-matplotlib
-ffmpeg-python
-SpeechRecognition
-pydub
+scikit‑learn
+reportlab
+parselmouth
+ffmpeg‑python
