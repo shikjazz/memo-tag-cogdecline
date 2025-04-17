@@ -1,11 +1,10 @@
-streamlit
-whisper
-openai‑whisper
+streamlit>=1.10.0
+openai-whisper
 pydub
 librosa
 numpy
 pandas
-scikit‑learn
+scikit-learn
 reportlab
 parselmouth
-ffmpeg‑python
+ffmpeg-python

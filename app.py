@@ -1,18 +1,18 @@
-import io
-import tempfile
-import numpy as np
-import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
 import streamlit as st
 import whisper
 import parselmouth
 import librosa
+import numpy as np
+import pandas as pd
 from pydub import AudioSegment
 from sklearn.cluster import DBSCAN
 from sklearn.ensemble import IsolationForest
-from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-from matplotlib import pyplot as plt
+
+# …the rest of your code…
 
 # Page config
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
