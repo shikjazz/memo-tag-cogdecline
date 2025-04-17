@@ -1,5 +1,6 @@
 streamlit
 librosa
+soundfile
 numpy
 pandas
 scikit-learn
