@@ -1,9 +1,9 @@
 streamlit
-whisper
-torch==2.1.0+cpu  --index-url https://download.pytorch.org/whl/cpu
 librosa
 numpy
 pandas
 scikit-learn
 matplotlib
 ffmpeg-python
+SpeechRecognition
+pydub
