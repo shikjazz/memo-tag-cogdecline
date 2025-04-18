@@ -1,7 +1,9 @@
 import warnings
 warnings.filterwarnings("ignore")
+
 import io
 import tempfile
+
 import streamlit as st
 import whisper
 import librosa
@@ -10,9 +12,10 @@ import pandas as pd
 from pydub import AudioSegment
 from sklearn.cluster import DBSCAN
 from sklearn.ensemble import IsolationForest
+import matplotlib.pyplot as plt
 from reportlab.pdfgen import canvas
-
-# …the rest of your code…
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 
 # Page config
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
@@ -22,7 +25,7 @@ st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
 def load_whisper(model_name="base"):
     return whisper.load_model(model_name)
 
-# Feature extraction with caching
+# Feature extraction with caching (no Parselmouth)
 @st.cache_data(show_spinner=False)
 def extract_features(audio_bytes: bytes, language: str, model_name: str):
     # save to a temp .wav
@@ -36,22 +39,14 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     res = model.transcribe(path, language=language)
     transcript = res["text"].strip()
 
-    # Parselmouth for jitter/shimmer/pitch
-    snd = parselmouth.Sound(path)
-    pitch = snd.to_pitch()
-    pp = parselmouth.praat.call(snd, "To PointProcess (periodic, cc)", 75, 500)
-    jitter = parselmouth.praat.call(pp, "Get jitter (local)", 0.0, 0.02, 1.3)
-    shimmer = parselmouth.praat.call(pp, "Get shimmer (local)", 0.0, 0.02, 1.3, 1.6)
-    freq = pitch.selected_array["frequency"]
-    pitch_mean, pitch_std = np.nanmean(freq), np.nanstd(freq)
-
-    # Pause detection & MFCCs
+    # Load audio for pause & MFCC analysis
     y, sr = librosa.load(path, sr=None)
     intervals = librosa.effects.split(y, top_db=25)
     speech_dur = sum((e - s) for s, e in intervals) / sr
     total_dur = len(y) / sr
     total_pause = total_dur - speech_dur
     num_pauses = max(len(intervals) - 1, 0)
+
     mfcc = librosa.feature.mfcc(y, sr=sr, n_mfcc=13)
     mfcc_means = mfcc.mean(axis=1)
     mfcc_stds = mfcc.std(axis=1)
@@ -59,57 +54,59 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     feats = {
         "filename": tmp.name.split("/")[-1],
         "transcript": transcript,
-        "total_duration": total_dur,
-        "total_pause": total_pause,
-        "num_pauses": num_pauses,
-        "jitter": jitter,
-        "shimmer": shimmer,
-        "pitch_mean": pitch_mean,
-        "pitch_std": pitch_std,
+        "total_duration": float(total_dur),
+        "total_pause": float(total_pause),
+        "num_pauses": int(num_pauses),
     }
-    # add mfcc stats
+    # attach MFCC stats
     for i in range(13):
         feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
-        feats[f"mfcc_{i+1}_std"] = float(mfcc_stds[i])
+        feats[f"mfcc_{i+1}_std"]  = float(mfcc_stds[i])
     return feats
 
-# Clustering + risk scoring
+# Clustering + risk scoring (pause‑only)
 @st.cache_data(show_spinner=False)
 def score_df(df: pd.DataFrame) -> pd.DataFrame:
-    X = df[["total_pause","num_pauses","jitter","shimmer","pitch_std"]]
+    # Use total_pause and num_pauses to define anomalies
+    X = df[["total_pause", "num_pauses"]]
     db = DBSCAN(eps=0.5, min_samples=2).fit(X)
     iso = IsolationForest(contamination=0.1).fit(X)
+
     df["dbscan_label"] = db.labels_
-    df["iso_score"] = iso.decision_function(X)
-    # weighted risk composite (0–100)
-    w_pause, w_j, w_s, w_iso = 0.4, 0.2, 0.2, 0.2
+    df["iso_score"]   = iso.decision_function(X)
+
+    # Composite risk: 50% pause duration, 50% pause count
+    w_pause, w_count, w_iso = 0.4, 0.4, 0.2
     r = (
-        (df.total_pause/df.total_pause.max())*w_pause +
-        (df.jitter/df.jitter.max())*w_j +
-        (df.shimmer/df.shimmer.max())*w_s +
-        (1 - (df.iso_score/df.iso_score.max()))*w_iso
+        (df.total_pause / df.total_pause.max()) * w_pause +
+        (df.num_pauses  / df.num_pauses.max() ) * w_count +
+        (1 - (df.iso_score / df.iso_score.max())) * w_iso
     )
-    df["risk_score"] = (r*100).clip(0,100).round(1)
+    df["risk_score"] = (r * 100).clip(0, 100).round(1)
     return df
 
 # Build a one‑page PDF report
 def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=letter)
+    c   = canvas.Canvas(buf, pagesize=letter)
     w, h = letter
+
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(30, h-30, "MemoTag Cognitive Decline Report")
-    text = c.beginText(30, h-60)
+    c.drawString(30, h - 30, "MemoTag Cognitive Decline Report")
+
+    text = c.beginText(30, h - 60)
     text.setFont("Helvetica", 10)
     row = df.iloc[0]
-    for k in ["filename","total_pause","num_pauses","jitter","shimmer","pitch_std","risk_score"]:
+    for k in ["filename", "total_pause", "num_pauses", "risk_score"]:
         text.textLine(f"{k}: {row[k]}")
     c.drawText(text)
+
     # embed chart
     img = io.BytesIO()
     fig.savefig(img, format="PNG", bbox_inches="tight")
     img.seek(0)
-    c.drawImage(ImageReader(img), 30, h-300, width=550, preserveAspectRatio=True)
+    c.drawImage(ImageReader(img), 30, h - 300, width=550, preserveAspectRatio=True)
+
     c.showPage()
     c.save()
     buf.seek(0)
@@ -120,7 +117,7 @@ st.title("📋 MemoTag Cognitive Decline Detection")
 
 # Sidebar settings
 st.sidebar.header("Settings")
-language = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
+language   = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
 model_name = st.sidebar.selectbox("Whisper Model", ["tiny","base","small","medium","large"], index=1)
 if st.sidebar.button("Clear Cache"):
     st.cache_data.clear()
@@ -137,20 +134,18 @@ records = []
 for f in files:
     with st.spinner(f"Processing {f.name}…"):
         feats = extract_features(f.read(), language, model_name)
-    feats["filename"] = f.name
+        feats["filename"] = f.name
     records.append(feats)
 
 df = pd.DataFrame(records)
 df = score_df(df)
 
-# Audio playback
+# Playback & display
 st.audio(files[0].read(), format="audio/wav")
 
-# Feature table
 st.subheader("🔍 Extracted Features & Scores")
 st.dataframe(df, use_container_width=True)
 
-# Scatter plot
 st.subheader("🗺️ Pause vs. Risk Score")
 fig, ax = plt.subplots()
 ax.scatter(df.total_pause, df.risk_score, s=60, edgecolor="k", alpha=0.7)
@@ -171,8 +166,7 @@ st.subheader("📝 Executive Summary")
 c1, c2 = st.columns(2)
 with c1:
     st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
-    st.markdown(f"- **Jitter:** {df.jitter.iloc[0]:.4f}")
-    st.markdown(f"- **Shimmer:** {df.shimmer.iloc[0]:.4f}")
+    st.markdown(f"- **Number of Pauses:** {df.num_pauses.iloc[0]}")
 with c2:
     st.markdown("**Cognitive Risk Score**")
     st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]}</h1>", unsafe_allow_html=True)
