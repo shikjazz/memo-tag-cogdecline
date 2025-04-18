@@ -7,6 +7,8 @@ SpeechRecognition>=3.14.2,<4
 pydub>=0.25.1,<0.26
 ffmpeg-python>=0.2.0,<0.3
 openai-whisper>=20230314
+matplotlib
+
 
 # Build tools (only needed if you ever rebuild parselmouth yourself)
 cmake>=3.24.2
