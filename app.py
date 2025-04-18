@@ -20,6 +20,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
+from st_aggrid import AgGrid, GridOptionsBuilder
 
 # --- Page config ---
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
@@ -50,7 +51,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     total_dur   = len(y) / sr
     total_pause = total_dur - speech_dur
     num_pauses  = max(len(intervals) - 1, 0)
-    speech_rate = len(words) / speech_dur if speech_dur>0 else 0.0
+    speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
     # MFCC summary
     mfcc       = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
@@ -91,7 +92,7 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     df["risk_score"] = df.risk_score.clip(0,100).round(1)
     return df
 
-# --- Multi‐page PDF builder ---
+# --- Multi‑page PDF builder ---
 def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
     buf = io.BytesIO()
     c   = canvas.Canvas(buf, pagesize=letter)
@@ -141,7 +142,6 @@ def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
     row = df.iloc[0]
     c.setFont("Helvetica-Bold", 16)
     c.drawString(40,h-40,"Results & Figures")
-    # Key metrics box
     c.setFont("Helvetica",11)
     metrics = [
         ("Total Duration (s)", f"{row.total_duration:.1f}"),
@@ -150,17 +150,16 @@ def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
         ("# Pauses", f"{int(row.num_pauses)}"),
         ("Risk Score (%)", f"{row.risk_score:.1f}")
     ]
-    y0 = h-80
     for i,(label,val) in enumerate(metrics):
-        c.drawString(40, y0 - 18*i, f"{label}: {val}")
+        c.drawString(40, h-80 - 18*i, f"{label}: {val}")
 
-    # Insert histogram
+    # histogram
     img1 = io.BytesIO()
     fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
     img1.seek(0)
     c.drawImage(ImageReader(img1), 300, h-300, width=3.0*inch, height=2.0*inch)
 
-    # Insert scatter
+    # scatter
     img2 = io.BytesIO()
     fig_scatter.savefig(img2,format="PNG",bbox_inches="tight")
     img2.seek(0)
@@ -172,19 +171,15 @@ def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
     c.drawString(40,h-40,"Glossary & Future Work")
     text = c.beginText(40,h-80)
     text.setFont("Helvetica",10)
-
-    # Glossary
     text.textLine("Glossary:")
     for term,definition in [
         ("VAD","Voice Activity Detection—separating speech vs. silence."),
-        ("MFCC","Mel‐Frequency Cepstral Coefficients—spectral features."),
-        ("DBSCAN","Density‐based clustering algorithm."),
+        ("MFCC","Mel‑Frequency Cepstral Coefficients—spectral features."),
+        ("DBSCAN","Density‑based clustering algorithm."),
         ("Isolation Forest","Anomaly detection via random tree isolation.")
     ]:
         text.textLine(f" • {term}: {definition}")
     text.textLine("")
-
-    # Future Work
     text.textLine("Future Work:")
     for fw in [
         "Validate risk thresholds against clinical datasets.",
@@ -206,57 +201,71 @@ language    = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es
 model_name  = st.sidebar.selectbox("Whisper Model", ["tiny","base","small","medium","large"], index=1)
 risk_thresh = st.sidebar.slider("High‑risk threshold (%)", 0, 100, 70)
 if st.sidebar.button("Clear Cache"):
-    st.cache_data.clear(); st.cache_resource.clear()
+    st.cache_data.clear()
+    st.cache_resource.clear()
 
 # --- Main ---
 st.title("📋 MemoTag Cognitive Decline Detection")
 files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
 if not files:
-    st.info("Upload at least one file to begin."); st.stop()
+    st.info("Upload at least one file to begin.")
+    st.stop()
 
 audio_bytes_list = [f.read() for f in files]
-records = [extract_features(b,language,model_name) for b in audio_bytes_list]
-df      = score_df(pd.DataFrame(records))
+records          = [extract_features(b,language,model_name) for b in audio_bytes_list]
+df               = score_df(pd.DataFrame(records))
 
 # KPI cards
 st.subheader("🏷️ Key Metrics")
 c1,c2,c3 = st.columns(3)
-c1.metric("Duration (s)", f"{df.total_duration.iloc[0]:.1f}")
-c2.metric("Speech Rate",   f"{df.speech_rate.iloc[0]:.2f} w/s")
-c3.metric("Risk Score (%)",f"{df.risk_score.iloc[0]:.1f}")
+c1.metric("Duration (s)",  f"{df.total_duration.iloc[0]:.1f}")
+c2.metric("Speech Rate",    f"{df.speech_rate.iloc[0]:.2f} w/s")
+c3.metric("Risk Score (%)", f"{df.risk_score.iloc[0]:.1f}%")
 
 # Playback & transcript
 st.subheader("🔊 Playback & Transcript")
 st.audio(audio_bytes_list[0])
 st.write(df.transcript.iloc[0])
 
-# Summary table
-summary = df[["filename","total_duration","speech_dur","total_pause","num_pauses","speech_rate","risk_score"]].copy()
-summary.columns = ["File","Total","Speech","Pause","# Pauses","Rate","Risk (%)"]
+# Interactive summary table via AgGrid
+summary = df[[
+    "filename","total_duration","speech_dur",
+    "total_pause","num_pauses","speech_rate","risk_score"
+]].copy()
+summary.columns = [
+    "File","Total (s)","Spoken (s)",
+    "Pause (s)","# Pauses","Rate (w/s)","Risk (%)"
+]
 st.subheader("🔍 Extracted Features & Risk Scores")
-st.dataframe(summary, use_container_width=True)
+gb = GridOptionsBuilder.from_dataframe(summary)
+gb.configure_column("Risk (%)", cellStyle={
+    "function": "params.value >= %d ? {'color':'red'} : {'color':'green'}" % risk_thresh
+})
+gridOpts = gb.build()
+AgGrid(summary, gridOptions=gridOpts, enable_enterprise_modules=False)
 
 # Histogram
 st.subheader("📊 Pause Length Distribution")
 fig_hist, axh = plt.subplots(figsize=(6,3))
-path          = df.tmp_path.iloc[0]
-y,sr          = librosa.load(path, sr=None, mono=True)
+y,sr          = librosa.load(df.tmp_path.iloc[0], sr=None, mono=True)
 ints          = librosa.effects.split(y, top_db=25)
 pause_lens    = [(ints[i][0]-ints[i-1][1])/sr for i in range(1,len(ints))]
 axh.hist(pause_lens, bins=20, edgecolor="k", alpha=0.7)
-axh.set_xlabel("Pause Length (s)"); axh.set_ylabel("Count")
+axh.set_xlabel("Pause Length (s)")
+axh.set_ylabel("Count")
 st.pyplot(fig_hist)
 
 # Scatter
 st.subheader("🗺️ Pause vs. Risk Score")
 fig_sc, axsc = plt.subplots(figsize=(6,4))
-cols = ["red" if r>=risk_thresh else "green" for r in df.risk_score]
-axsc.scatter(df.total_pause, df.risk_score, c=cols, edgecolor="k", s=80, alpha=0.8)
+colors = ["red" if r>=risk_thresh else "green" for r in df.risk_score]
+axsc.scatter(df.total_pause, df.risk_score, c=colors, edgecolor="k", s=80, alpha=0.8)
 axsc.axhline(risk_thresh, color="gray", linestyle="--")
-axsc.set_xlabel("Total Pause (s)"); axsc.set_ylabel("Risk (%)")
+axsc.set_xlabel("Total Pause (s)")
+axsc.set_ylabel("Risk (%)")
 st.pyplot(fig_sc)
 
-# In‐app Detailed Analysis
+# In‑app Detailed Analysis
 st.subheader("📑 Detailed Analysis Report")
 with st.expander("Project Overview"):
     st.write(
@@ -265,16 +274,16 @@ with st.expander("Project Overview"):
     )
 with st.expander("Methodology"):
     st.write(
-        "- **Speech-to-Text:** Whisper\n"
+        "- **Speech‑to‑Text:** Whisper\n"
         "- **Pause Detection:** librosa.effects.split\n"
         "- **Feature Extraction:** pause metrics, MFCCs\n"
-        "- **Scoring:** DBSCAN + IsolationForest → 0–100 risk"
+        "- **Scoring:** DBSCAN + IsolationForest → 0‑100 risk"
     )
 with st.expander("Glossary"):
     st.write(
         "**VAD:** Voice Activity Detection\n"
         "**MFCC:** Mel‑Frequency Cepstral Coefficients\n"
-        "**DBSCAN:** Density-based clustering\n"
+        "**DBSCAN:** Density‑based clustering\n"
         "**IsolationForest:** Anomaly detection"
     )
 with st.expander("Results & Figures"):
@@ -289,7 +298,7 @@ with st.expander("Future Work"):
 
 # Downloads
 csv     = df.to_csv(index=False).encode("utf-8")
-pdf_buf = make_pdf(df,fig_hist,fig_sc,risk_thresh)
+pdf_buf = make_pdf(df, fig_hist, fig_sc, risk_thresh)
 
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
