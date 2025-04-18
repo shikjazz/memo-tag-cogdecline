@@ -3,7 +3,6 @@ warnings.filterwarnings("ignore")
 
 import io
 import os
-import json
 import tempfile
 import textwrap
 import base64
@@ -60,7 +59,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         # Audio load
         y, sr = librosa.load(path, sr=None, mono=True)
 
-        # Voice Activity Detection & Pause metrics
+        # VAD & Pause metrics
         intervals   = librosa.effects.split(y, top_db=25)
         speech_dur  = sum((e - s) for s, e in intervals) / sr
         total_dur   = len(y) / sr
@@ -69,9 +68,11 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
         # Prosodic: pitch & loudness
-        f0, voiced_flag, _ = librosa.pyin(y,
+        f0, voiced_flag, _ = librosa.pyin(
+            y,
             fmin=librosa.note_to_hz('C2'),
-            fmax=librosa.note_to_hz('C7'))
+            fmax=librosa.note_to_hz('C7')
+        )
         pitch_mean = np.nanmean(f0)
         pitch_var  = np.nanvar(f0)
         rms        = librosa.feature.rms(y=y).mean()
@@ -123,66 +124,135 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
 def plot_trend(all_dfs):
     trend = pd.DataFrame({
         "session": list(range(1, len(all_dfs)+1)),
-        "risk_score": [df.risk_score.iloc[0] for df in all_dfs]
+        "risk_score": [d.risk_score.iloc[0] for d in all_dfs]
     })
     fig = px.line(trend, x="session", y="risk_score", markers=True,
                   title="Risk Score Over Multiple Sessions")
     st.plotly_chart(fig, use_container_width=True)
 
-# --- PDF builder (no change) ---
+# --- Multi‑page PDF builder ---
 def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
-    # ... your existing multi‑page PDF builder here ...
-    pass  # omitted for brevity
+    buf = io.BytesIO()
+    c   = canvas.Canvas(buf, pagesize=letter)
+    w,h = letter
+
+    # Page 1 – Overview
+    c.setFont("Helvetica-Bold",18)
+    c.drawString(40,h-40,"MemoTag Cognitive Decline Analysis Report")
+    t = c.beginText(40,h-80); t.setFont("Helvetica",11)
+    overview = (
+      "This application uses Whisper for speech-to-text and librosa for audio analysis "
+      "to detect speech pauses and compute a composite risk score. Elevated pauses "
+      "can be an early indicator of cognitive decline."
+    )
+    for line in textwrap.wrap(overview,100):
+        t.textLine(line)
+    c.drawText(t); c.showPage()
+
+    # Page 2 – Methodology
+    c.setFont("Helvetica-Bold",16)
+    c.drawString(40,h-40,"Methodology")
+    t = c.beginText(40,h-80); t.setFont("Helvetica",10)
+    steps = [
+      ("1. Transcription","Whisper → text transcript & word count."),
+      ("2. VAD & Pause","librosa.effects.split → speech vs. silence → pause metrics."),
+      ("3. Feature Extraction","MFCCs & prosodic features extracted."),
+      ("4. Scoring","DBSCAN + IsolationForest → normalized 0–100 risk score.")
+    ]
+    for title,body in steps:
+        t.textLine(title+":")
+        for ln in textwrap.wrap(body,90):
+            t.textLine("   "+ln)
+        t.textLine("")
+    c.drawText(t); c.showPage()
+
+    # Page 3 – Results & Figures
+    row = df.iloc[0]
+    c.setFont("Helvetica-Bold",16)
+    c.drawString(40,h-40,"Results & Figures")
+    c.setFont("Helvetica",11)
+    metrics = [
+      ("Total Duration (s)",f"{row.total_duration:.1f}"),
+      ("Speech Rate (w/s)",   f"{row.speech_rate:.2f}"),
+      ("Total Pause (s)",     f"{row.total_pause:.1f}"),
+      ("# Pauses",            f"{int(row.num_pauses)}"),
+      ("Risk Score (%)",      f"{row.risk_score:.1f}")
+    ]
+    for i,(lbl,val) in enumerate(metrics):
+        c.drawString(40,h-80-18*i,f"{lbl}: {val}")
+
+    img1 = io.BytesIO()
+    fig_hist.savefig(img1,format="PNG",bbox_inches="tight"); img1.seek(0)
+    c.drawImage(ImageReader(img1),300,h-300,width=3*inch,height=2*inch)
+
+    img2 = io.BytesIO()
+    fig_scatter.savefig(img2,format="PNG",bbox_inches="tight"); img2.seek(0)
+    c.drawImage(ImageReader(img2),40,h-300,width=3*inch,height=2*inch)
+    c.showPage()
+
+    # Page 4 – Glossary & Future Work
+    c.setFont("Helvetica-Bold",16)
+    c.drawString(40,h-40,"Glossary & Future Work")
+    t = c.beginText(40,h-80); t.setFont("Helvetica",10)
+    for term,defn in [
+      ("VAD","Voice Activity Detection—speech vs. silence."),
+      ("MFCC","Mel‑Frequency Cepstral Coefficients."),
+      ("DBSCAN","Density‑based clustering."),
+      ("IsolationForest","Tree‑based anomaly detection.")
+    ]:
+        t.textLine(f"• {term}: {defn}")
+    t.textLine("")
+    t.textLine("Future Work:")
+    for fw in [
+      "Validate thresholds on clinical datasets.",
+      "Add jitter/shimmer prosody.",
+      "Longitudinal tracking dashboard.",
+      "Deploy REST API & clinician UI."
+    ]:
+        t.textLine(f"• {fw}")
+    c.drawText(t); c.showPage()
+
+    c.save()
+    buf.seek(0)
+    return buf
 
 # --- Sidebar settings ---
 st.sidebar.header("Settings")
 language    = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
-model_name  = st.sidebar.selectbox("Whisper Model", ["tiny","base","small","medium","large"], index=1)
+model_name  = st.sidebar.selectbox("Whisper Model",        ["tiny","base","small","medium","large"], index=1)
 risk_thresh = st.sidebar.slider("High‑risk threshold (%)", 0, 100, 70)
 if st.sidebar.button("Clear Cache"):
     st.cache_data.clear(); st.cache_resource.clear()
 
 # --- Main UI ---
 st.title("📋 MemoTag Cognitive Decline Detection")
-
-files = st.file_uploader(
-    "Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"],
-    accept_multiple_files=True
-)
+files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
 if not files:
-    st.info("👆 Upload at least one file to begin.")
-    st.stop()
+    st.info("👆 Upload at least one file to begin."); st.stop()
 
-# Process all sessions
-all_records = []
-all_dfs     = []
+all_records, all_dfs = [], []
 for f in files:
     feats = extract_features(f.read(), language, model_name)
-    if feats:
-        all_records.append(feats)
+    if feats: all_records.append(feats)
 df = pd.DataFrame(all_records)
 df = score_df(df)
 all_dfs.append(df)
 
-# KPI cards (latest session)
 latest = df.iloc[0]
 st.subheader("🏷️ Key Metrics")
-c1, c2, c3 = st.columns(3)
-c1.metric("Duration (s)", f"{latest.total_duration:.1f}")
+c1,c2,c3 = st.columns(3)
+c1.metric("Duration (s)",  f"{latest.total_duration:.1f}")
 c2.metric("Speech Rate",   f"{latest.speech_rate:.2f} w/s")
 c3.metric("Risk Score (%)",f"{latest.risk_score:.1f}%")
 
-# Trend if multiple
-if len(all_dfs) > 1:
+if len(all_dfs)>1:
     st.subheader("📈 Longitudinal Trend")
     plot_trend(all_dfs)
 
-# Playback & transcript
 st.subheader("🔊 Playback & Transcript")
 st.audio(files[0].read())
 st.write(latest.transcript)
 
-# Interactive summary table
 summary = df[[
     "filename","total_duration","speech_dur",
     "total_pause","num_pauses","speech_rate","pitch_mean","rms","risk_score"
@@ -194,20 +264,17 @@ summary.columns = [
 st.subheader("🔍 Extracted Features & Risk Scores")
 gb = GridOptionsBuilder.from_dataframe(summary)
 gb.configure_column("Risk (%)", cellStyle={
-    "function":
-    f"params.value >= {risk_thresh} ? {{'color':'red'}} : {{'color':'green'}}"
+    "function": f"params.value >= {risk_thresh} ? {{'color':'red'}} : {{'color':'green'}}"
 })
 AgGrid(summary, gridOptions=gb.build(), enable_enterprise_modules=False)
 
-# Pause histogram & interactive scatter
 st.subheader("📊 Pause Distribution & Risk Mapping")
 fig_hist, axh = plt.subplots()
-y, sr         = librosa.load(df.tmp_path.iloc[0], sr=None, mono=True)
-ints          = librosa.effects.split(y, top_db=25)
-pause_lens    = [(ints[i][0]-ints[i-1][1])/sr for i in range(1,len(ints))]
+y,sr = librosa.load(df.tmp_path.iloc[0], sr=None, mono=True)
+ints = librosa.effects.split(y, top_db=25)
+pause_lens = [(ints[i][0]-ints[i-1][1])/sr for i in range(1,len(ints))]
 axh.hist(pause_lens, bins=20, edgecolor="k", alpha=0.7)
-axh.set_xlabel("Pause Length (s)")
-axh.set_ylabel("Count")
+axh.set_xlabel("Pause Length (s)"); axh.set_ylabel("Count")
 st.pyplot(fig_hist)
 
 fig_px = px.scatter(df, x="total_pause", y="risk_score",
@@ -217,26 +284,13 @@ fig_px = px.scatter(df, x="total_pause", y="risk_score",
 fig_px.add_hline(y=risk_thresh, line_dash="dash")
 st.plotly_chart(fig_px, use_container_width=True)
 
-# Expanders for detail
 st.subheader("📑 Detailed Analysis Report")
-with st.expander("Project Overview"):
-    st.write("...")
-
-with st.expander("Methodology"):
-    st.write("...")
-
-with st.expander("Glossary"):
-    st.write("...")
-
-with st.expander("Results & Figures"):
-    st.write("Histogram and interactive scatter above.")
-
-with st.expander("Future Work"):
-    st.write("...")
+for section in ["Project Overview","Methodology","Glossary","Results & Figures","Future Work"]:
+    with st.expander(section):
+        st.write("See above sections or PDF for details.")
 
 # Downloads
 csv     = df.to_csv(index=False).encode("utf-8")
 pdf_buf = make_pdf(df, fig_hist, fig_px, risk_thresh)
-
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
