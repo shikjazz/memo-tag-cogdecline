@@ -1,6 +1,7 @@
 import warnings
 warnings.filterwarnings("ignore")
 import io
+import tempfile
 import streamlit as st
 import whisper
 import librosa
