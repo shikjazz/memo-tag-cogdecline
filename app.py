@@ -4,7 +4,6 @@ warnings.filterwarnings("ignore")
 import io
 import tempfile
 import textwrap
-import base64
 
 import streamlit as st
 import whisper
@@ -65,7 +64,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         num_pauses = max(len(intervals) - 1, 0)
         speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
-        f0, voiced_flag, _ = librosa.pyin(
+        f0, _, _ = librosa.pyin(
             y,
             fmin=librosa.note_to_hz("C2"),
             fmax=librosa.note_to_hz("C7"),
@@ -138,7 +137,7 @@ def plot_trend(all_dfs):
     st.plotly_chart(fig, use_container_width=True)
 
 # --- PDF builder ---
-def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
+def make_pdf(df, fig_hist: plt.Figure, fig_sc_mpl: plt.Figure, risk_thresh):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     w, h = letter
@@ -188,13 +187,13 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
     for i, (lbl, val) in enumerate(metrics):
         c.drawString(40, h - 80 - 18 * i, f"{lbl}: {val}")
 
-    # insert histogram
+    # Insert histogram
     img1 = io.BytesIO()
     fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
     img1.seek(0)
     c.drawImage(ImageReader(img1), 300, h - 300, width=3 * inch, height=2 * inch)
 
-    # insert Matplotlib scatter
+    # Insert Matplotlib scatter
     img2 = io.BytesIO()
     fig_sc_mpl.savefig(img2, format="PNG", bbox_inches="tight")
     img2.seek(0)
@@ -223,8 +222,7 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
     ]
     for fw in future:
         t.textLine(f"• {fw}")
-    c.drawText(t)
-    c.showPage()
+    c.drawText(t); c.showPage()
 
     c.save()
     buf.seek(0)
@@ -273,27 +271,63 @@ if len(all_dfs) > 1:
 
 # Playback & transcript
 st.subheader("🔊 Playback & Transcript")
-st.audio(audio_bytes_list[0])  # <-- let Streamlit auto‑detect format
+st.audio(audio_bytes_list[0])
 st.write(latest.transcript)
 
 # Interactive summary table
-summary = df[[...]]  # same as before
-# configure AgGrid exactly as in your snippet…
+summary = df[[
+    "filename","total_duration","speech_dur","total_pause",
+    "num_pauses","speech_rate","pitch_mean","rms","risk_score"
+]].copy()
+summary.columns = [
+    "File","Total (s)","Spoken (s)","Pause (s)",
+    "# Pauses","Rate (w/s)","Pitch Mean","Loudness (RMS)","Risk (%)"
+]
+st.subheader("🔍 Extracted Features & Risk Scores")
+gb = GridOptionsBuilder.from_dataframe(summary)
+gb.configure_column(
+    "Risk (%)",
+    cellStyle={
+        "function": f"params.value >= {risk_thresh} ? {{'color':'red'}} : {{'color':'green'}}"
+    }
+)
+AgGrid(summary, gridOptions=gb.build(), enable_enterprise_modules=False)
 
 # Pause histogram & Plotly scatter
+st.subheader("📊 Pause Distribution & Risk Mapping")
 fig_hist, axh = plt.subplots()
-# …draw histogram…
+y, sr = librosa.load(df.tmp_path.iloc[0], sr=None, mono=True)
+ints = librosa.effects.split(y, top_db=25)
+pause_lens = [(ints[i][0] - ints[i-1][1]) / sr for i in range(1, len(ints))]
+axh.hist(pause_lens, bins=20, edgecolor="k", alpha=0.7)
+axh.set_xlabel("Pause Length (s)")
+axh.set_ylabel("Count")
 st.pyplot(fig_hist)
 
-fig_px = px.scatter(...)
+fig_px = px.scatter(
+    df, x="total_pause", y="risk_score",
+    color=df.risk_score >= risk_thresh,
+    color_discrete_map={True:"red", False:"green"},
+    labels={"color":"High Risk"}
+)
+fig_px.add_hline(y=risk_thresh, line_dash="dash")
 st.plotly_chart(fig_px, use_container_width=True)
 
 # Prepare Matplotlib scatter for PDF
 fig_sc_mpl, ax_sc = plt.subplots()
-# …draw scatter…
+colors = ["red" if r >= risk_thresh else "green" for r in df.risk_score]
+ax_sc.scatter(df.total_pause, df.risk_score, c=colors, edgecolor="k", s=80, alpha=0.8)
+ax_sc.axhline(risk_thresh, linestyle="--", color="gray")
+ax_sc.set_xlabel("Total Pause (s)")
+ax_sc.set_ylabel("Risk (%)")
+# (we do NOT display fig_sc_mpl)
 
 # Expanders
-for section in [...]:
+st.subheader("📑 Detailed Analysis Report")
+for section in [
+    "Project Overview","Methodology",
+    "Glossary","Results & Figures","Future Work"
+]:
     with st.expander(section):
         st.write("See PDF or above charts for details.")
 
