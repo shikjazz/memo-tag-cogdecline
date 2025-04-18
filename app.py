@@ -68,6 +68,11 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
 # Clustering + risk scoring
 @st.cache_data(show_spinner=False)
 def score_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Fallback for single file: use pause percentage
+    if len(df) == 1:
+        df["risk_score"] = ((df.total_pause / df.total_duration) * 100).round(1)
+        return df
+
     X = df[["total_pause", "num_pauses"]]
     db  = DBSCAN(eps=0.5, min_samples=2).fit(X)
     iso = IsolationForest(contamination=0.1).fit(X)
@@ -93,25 +98,56 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     df["risk_score"] = df.risk_score.clip(0,100).round(1)
     return df
 
-# PDF builder
+# PDF builder (now includes full summary table + exec summary)
 def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
     buf = io.BytesIO()
     c   = canvas.Canvas(buf, pagesize=letter)
     w,h = letter
+
+    # Title
     c.setFont("Helvetica-Bold", 14)
     c.drawString(30, h-30, "MemoTag Cognitive Decline Report")
 
-    text = c.beginText(30, h-60)
+    # Transcript
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, h-60, "Transcript:")
+    text = c.beginText(30, h-80)
     text.setFont("Helvetica", 10)
-    row = df.iloc[0]
-    for k in ["filename", "total_pause", "num_pauses", "risk_score"]:
-        text.textLine(f"{k}: {row[k]}")
+    for line in df.transcript.iloc[0].split("\n"):
+        text.textLine(line)
     c.drawText(text)
 
+    # Summary table
+    summary = df[["filename","total_duration","total_pause","num_pauses","risk_score"]].copy()
+    summary.columns = ["File","Duration (s)","Pause (s)","Pauses Count","Risk (%)"]
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, h-150, "Summary Table:")
+    table_text = c.beginText(30, h-170)
+    table_text.setFont("Helvetica", 10)
+    # header row
+    table_text.textLine(" | ".join(summary.columns))
+    table_text.textLine("-" * 80)
+    # each row
+    for _, row in summary.iterrows():
+        vals = [str(row[c]) for c in summary.columns]
+        table_text.textLine(" | ".join(vals))
+    c.drawText(table_text)
+
+    # Embed chart
     img = io.BytesIO()
     fig.savefig(img, format="PNG", bbox_inches="tight")
     img.seek(0)
-    c.drawImage(ImageReader(img), 30, h-300, width=550, preserveAspectRatio=True)
+    c.drawImage(ImageReader(img), 30, h-350, width=550, preserveAspectRatio=True)
+
+    # Executive summary
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, h-500, "Executive Summary:")
+    summ = c.beginText(30, h-520)
+    summ.setFont("Helvetica", 10)
+    summ.textLine(f"Total Pause:  {df.total_pause.iloc[0]:.1f} s")
+    summ.textLine(f"Pauses Count: {int(df.num_pauses.iloc[0])}")
+    summ.textLine(f"Risk Score:   {df.risk_score.iloc[0]:.1f} %")
+    c.drawText(summ)
 
     c.showPage()
     c.save()
@@ -134,15 +170,13 @@ files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"],
 if not files:
     st.info("Upload at least one audio file to begin.")
     st.stop()
-
 audio_bytes_list = [f.read() for f in files]
 
 # Process
 records = []
-for bytes_ in audio_bytes_list:
+for b in audio_bytes_list:
     with st.spinner("Extracting features…"):
-        feats = extract_features(bytes_, language, model_name)
-    records.append(feats)
+        records.append(extract_features(b, language, model_name))
 
 df = pd.DataFrame(records)
 df = score_df(df)
@@ -152,7 +186,7 @@ st.subheader("🔊 Playback & Transcript")
 st.audio(audio_bytes_list[0])
 st.markdown(f"**Transcript:** {df.transcript.iloc[0]}")
 
-# **CLEAN** summary table
+# CLEAN summary table
 summary = df[["filename","total_duration","total_pause","num_pauses","risk_score"]].copy()
 summary.columns = ["File","Duration (s)","Pause (s)","Pauses Count","Risk (%)"]
 st.subheader("🔍 Extracted Features & Risk Scores")
@@ -170,7 +204,7 @@ st.pyplot(fig)
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 
-# PDF download + inline preview (300px tall)
+# PDF download + inline preview
 pdf_buf = make_pdf(df, fig)
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
 
@@ -186,7 +220,7 @@ st.subheader("📝 Executive Summary")
 c1, c2 = st.columns(2)
 with c1:
     st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
-    st.markdown(f"- **Pauses Count:** {df.num_pauses.iloc[0]}")
+    st.markdown(f"- **Pauses Count:** {int(df.num_pauses.iloc[0])}")
 with c2:
     st.markdown("**Cognitive Risk Score**")
     st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]:.1f}%</h1>", unsafe_allow_html=True)
