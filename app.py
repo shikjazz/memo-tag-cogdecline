@@ -1,4 +1,3 @@
-# app.py
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -20,19 +19,18 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
 
-# --- Page config & theme ---
+# --- Page config ---
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
-# optional: st.set_theme({"primaryColor":"#d6336c","backgroundColor":"#0e1117"})
 
-# --- Model caching ---
+# --- Whisper model cache ---
 @st.cache_resource(show_spinner=False)
 def load_whisper(model_name="base"):
     return whisper.load_model(model_name)
 
-# --- Feature extraction ---
+# --- Feature extraction (no parselmouth) ---
 @st.cache_data(show_spinner=False)
 def extract_features(audio_bytes: bytes, language: str, model_name: str):
-    # save to .wav
+    # write to temp WAV
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
         seg.export(tmp.name, format="wav")
@@ -43,29 +41,30 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     res   = model.transcribe(path, language=language)
     transcript = res["text"].strip()
     words = transcript.split()
-    # 2) Load & VAD
+
+    # 2) VAD via librosa
     y, sr = librosa.load(path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=25)
-    speech_dur = sum((e - s) for s, e in intervals) / sr
-    total_dur  = len(y) / sr
-    total_pause= total_dur - speech_dur
-    num_pauses = max(len(intervals)-1, 0)
-    # speech rate = words per second of _speech_
-    speech_rate = len(words)/speech_dur if speech_dur>0 else 0.0
+    speech_dur  = sum((e - s) for s, e in intervals) / sr
+    total_dur   = len(y) / sr
+    total_pause = total_dur - speech_dur
+    num_pauses  = max(len(intervals) - 1, 0)
+    speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
-    # 3) MFCC (optional)
+    # 3) MFCC stats (optional)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     mfcc_means = mfcc.mean(axis=1)
     mfcc_stds  = mfcc.std(axis=1)
 
     feats = {
-        "filename":        tmp.name.split("/")[-1],
-        "transcript":      transcript,
-        "total_duration":  total_dur,
-        "speech_dur":      speech_dur,
-        "total_pause":     total_pause,
-        "num_pauses":      num_pauses,
-        "speech_rate":     speech_rate,
+        "filename":       tmp.name.split("/")[-1],
+        "tmp_path":       path,                     # for histogram reuse
+        "transcript":     transcript,
+        "total_duration": total_dur,
+        "speech_dur":     speech_dur,
+        "total_pause":    total_pause,
+        "num_pauses":     num_pauses,
+        "speech_rate":    speech_rate,
     }
     for i in range(13):
         feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
@@ -81,19 +80,17 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     df["dbscan_label"] = db.labels_
     df["iso_score"]    = iso.decision_function(X)
 
-    # normalize safely
     pmax, nmax, imax = df.total_pause.max(), df.num_pauses.max(), df.iso_score.max()
-    df["pause_norm"] = df.total_pause.apply(lambda v: v/pmax  if pmax>0 else 0)
-    df["count_norm"] = df.num_pauses.apply(lambda v: v/nmax  if nmax>0 else 0)
+    df["pause_norm"] = df.total_pause.apply(lambda v: v/pmax if pmax>0 else 0)
+    df["count_norm"] = df.num_pauses.apply(lambda v: v/nmax if nmax>0 else 0)
     df["iso_norm"]   = df.iso_score.apply(lambda v: 1-(v/imax) if imax>0 else 0).fillna(0)
 
-    # weighted composite
     w1, w2, w3 = 0.5, 0.3, 0.2
-    df["risk_score"] = (df.pause_norm*w1 + df.count_norm*w2 + df.iso_norm*w3)*100
+    df["risk_score"] = (df.pause_norm*w1 + df.count_norm*w2 + df.iso_norm*w3) * 100
     df["risk_score"] = df.risk_score.clip(0,100).round(1)
     return df
 
-# --- PDF builder (single page) ---
+# --- PDF report builder ---
 def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
     buf = io.BytesIO()
     c   = canvas.Canvas(buf, pagesize=letter)
@@ -113,22 +110,26 @@ def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
     img.seek(0)
     c.drawImage(ImageReader(img), 30, h-350, width=550, preserveAspectRatio=True)
 
-    c.showPage(); c.save(); buf.seek(0)
+    c.showPage()
+    c.save()
+    buf.seek(0)
     return buf
 
-# --- UI: Sidebar settings ---
+# --- Sidebar settings ---
 st.sidebar.header("Settings")
 language    = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
 model_name  = st.sidebar.selectbox("Whisper Model",       ["tiny","base","small","medium","large"], index=1)
 risk_thresh = st.sidebar.slider("High‑risk threshold (%)", 0, 100, 70)
 if st.sidebar.button("Clear Cache"):
-    st.cache_data.clear(); st.cache_resource.clear()
+    st.cache_data.clear()
+    st.cache_resource.clear()
 
-# --- UI: File upload & processing ---
+# --- Main UI ---
 st.title("📋 MemoTag Cognitive Decline Detection")
 files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
 if not files:
-    st.info("Upload at least one audio file to begin."); st.stop()
+    st.info("Upload at least one audio file to begin.")
+    st.stop()
 
 audio_bytes_list = [f.read() for f in files]
 records = []
@@ -139,19 +140,19 @@ for b in audio_bytes_list:
 df = pd.DataFrame(records)
 df = score_df(df)
 
-# --- UI: KPI cards ---
+# KPI cards
 st.subheader("🏷️ Key Metrics")
 k1,k2,k3 = st.columns(3)
 k1.metric("Total Duration (s)", f"{df.total_duration.iloc[0]:.1f}")
 k2.metric("Speech Rate (w/s)",     f"{df.speech_rate.iloc[0]:.2f}")
 k3.metric("Risk Score (%)",         f"{df.risk_score.iloc[0]:.1f}")
 
-# --- UI: Playback & transcript ---
+# Playback & transcript
 st.subheader("🔊 Playback & Transcript")
 st.audio(audio_bytes_list[0])
 st.markdown(f"**Transcript:** {df.transcript.iloc[0]}")
 
-# --- UI: Clean summary table ---
+# Clean summary table
 summary = df[[
     "filename","total_duration","speech_dur",
     "total_pause","num_pauses","speech_rate","risk_score"
@@ -163,18 +164,24 @@ summary.columns = [
 st.subheader("🔍 Extracted Features & Risk Scores")
 st.dataframe(summary, use_container_width=True)
 
-# --- UI: Histogram of pause lengths ---
-# calculate individual pause durations
-intervals = librosa.effects.split(
-    librosa.effects.split(
-        librosa.util.buf_to_float(audio_bytes_list[0]), top_db=25
-    ), top_db=25
-)
-# better: reuse y, intervals from extract_features if you like
+# Pause‑length histogram
+st.subheader("📊 Pause‑Length Distribution")
+# reload the same file
+path = df.tmp_path.iloc[0]
+y, sr = librosa.load(path, sr=None, mono=True)
+intervals = librosa.effects.split(y, top_db=25)
+# compute pauses between intervals
+pause_lengths = [
+    (intervals[i][0] - intervals[i-1][1]) / sr
+    for i in range(1, len(intervals))
+]
+fig2, ax2 = plt.subplots(figsize=(6,3))
+ax2.hist(pause_lengths, bins=20, edgecolor="k", alpha=0.7)
+ax2.set_xlabel("Pause Length (s)")
+ax2.set_ylabel("Count")
+st.pyplot(fig2)
 
-# (for brevity we skip recomputing here)
-
-# --- UI: Pause vs Risk scatter (color‐coded) ---
+# Pause vs Risk scatter
 st.subheader("🗺️ Pause vs. Risk Score")
 fig, ax = plt.subplots(figsize=(6,4))
 colors = ["red" if r>risk_thresh else "green" for r in df.risk_score]
@@ -184,7 +191,7 @@ ax.set_ylabel("Risk Score (%)")
 ax.axhline(risk_thresh, color="gray", linestyle="--", linewidth=1)
 st.pyplot(fig)
 
-# --- UI: Downloads & inline PDF preview ---
+# Downloads & PDF preview
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 
@@ -194,7 +201,7 @@ b64 = base64.b64encode(pdf_buf.getvalue()).decode("utf-8")
 iframe = f"""<iframe src="data:application/pdf;base64,{b64}" width="100%" height="300px"></iframe>"""
 st.markdown(iframe, unsafe_allow_html=True)
 
-# --- UI: Executive summary + category ---
+# Executive summary + category
 st.subheader("📝 Executive Summary")
 cat = (
     "High Risk"   if df.risk_score.iloc[0] >= risk_thresh else
