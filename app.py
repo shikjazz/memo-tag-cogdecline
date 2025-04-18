@@ -48,7 +48,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     total_pause = total_dur - speech_dur
     num_pauses = max(len(intervals) - 1, 0)
 
-    # MFCC stats (optional)
+    # MFCC stats just in case
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     mfcc_means = mfcc.mean(axis=1)
     mfcc_stds = mfcc.std(axis=1)
@@ -60,13 +60,13 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         "total_pause": total_pause,
         "num_pauses": num_pauses,
     }
-    # add mfcc stats
+    # add mfcc stats (optional)
     for i in range(13):
         feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
         feats[f"mfcc_{i+1}_std"] = float(mfcc_stds[i])
     return feats
 
-# Clustering + risk scoring (pause‐only), guard zero‐division
+# Clustering + risk scoring (pause‐only)
 @st.cache_data(show_spinner=False)
 def score_df(df: pd.DataFrame) -> pd.DataFrame:
     X = df[["total_pause", "num_pauses"]]
@@ -75,17 +75,12 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     df["dbscan_label"] = db.labels_
     df["iso_score"] = iso.decision_function(X)
 
-    # avoid divide‑by‑zero
-    max_pause = df.total_pause.max() or 1.0
-    max_pauses = df.num_pauses.max() or 1.0
-    max_iso = df.iso_score.max() or 1.0
-
     # weighted risk composite (0–100)
     w_pause, w_pauses, w_iso = 0.5, 0.3, 0.2
     r = (
-        (df.total_pause / max_pause) * w_pause
-        + (df.num_pauses / max_pauses) * w_pauses
-        + (1 - (df.iso_score / max_iso)) * w_iso
+        (df.total_pause / df.total_pause.max()) * w_pause
+        + (df.num_pauses / df.num_pauses.max()) * w_pauses
+        + (1 - (df.iso_score / df.iso_score.max())) * w_iso
     )
     df["risk_score"] = (r * 100).clip(0, 100).round(1)
     return df
@@ -144,15 +139,22 @@ for f in files:
 df = pd.DataFrame(records)
 df = score_df(df)
 
-# Audio playback + transcript
+# Audio playback & description
 st.subheader("🔊 Audio Playback & Description")
 st.audio(files[0].read(), format="audio/wav")
 st.markdown("**Verbal Description (Transcript):**")
-st.write(df.transcript.iloc[0] or "_[no speech detected]_")
+st.write(df.loc[0, "transcript"])
 
-# Feature table
+# Transposed feature table: metrics ↓, files →
 st.subheader("🔍 Extracted Features & Scores")
-st.dataframe(df, use_container_width=True)
+wide_df = df.set_index("filename").T
+fmt = {
+    "total_duration": "{:.2f}",
+    "total_pause":    "{:.2f}",
+    "num_pauses":     "{:.0f}",
+    "risk_score":     "{:.1f}"
+}
+st.dataframe(wide_df.style.format(fmt), use_container_width=True)
 
 # Scatter plot
 st.subheader("🗺️ Pause vs. Risk Score")
