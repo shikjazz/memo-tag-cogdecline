@@ -12,5 +12,5 @@ openai-whisper>=20230314
 cmake>=3.24.2
 ninja
 scikit-build
-
+reportlab>=3.6.0
 
