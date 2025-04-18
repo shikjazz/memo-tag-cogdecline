@@ -9,3 +9,5 @@ openai-whisper>=20230314
 matplotlib>=3.5
 scikit-learn>=1.1,<2.0
 reportlab>=4.4
+streamlit-screenshot>=0.0.1
+librosa-display>=0.8.1
