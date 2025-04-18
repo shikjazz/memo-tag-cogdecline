@@ -1,0 +1,4 @@
+# .streamlit/config.toml
+[watch]
+# ignore all files under any torch/ directory
+ignorePatterns = ["**/torch/**"]
