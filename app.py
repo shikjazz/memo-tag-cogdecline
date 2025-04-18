@@ -3,7 +3,6 @@ warnings.filterwarnings("ignore")
 
 import streamlit as st
 import whisper
-import parselmouth
 import librosa
 import numpy as np
 import pandas as pd
