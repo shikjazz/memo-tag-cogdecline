@@ -22,20 +22,8 @@ from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from st_aggrid import AgGrid, GridOptionsBuilder
 
-# --- Page config & theming ---
+# --- Page config ---
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
-
-def toggle_theme():
-    st.session_state.dark_mode = not st.session_state.dark_mode
-
-st.sidebar.checkbox("Dark mode", value=st.session_state.dark_mode, on_change=toggle_theme)
-if st.session_state.dark_mode:
-    st.markdown(
-        "<style>body { background-color: #303030; color: #EEE; }</style>",
-        unsafe_allow_html=True
-    )
 
 # --- Whisper model cache ---
 @st.cache_resource(show_spinner=False)
@@ -187,13 +175,13 @@ def make_pdf(df, fig_hist: plt.Figure, fig_sc_mpl: plt.Figure, risk_thresh):
     for i, (lbl, val) in enumerate(metrics):
         c.drawString(40, h - 80 - 18 * i, f"{lbl}: {val}")
 
-    # Insert histogram
+    # insert histogram
     img1 = io.BytesIO()
     fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
     img1.seek(0)
     c.drawImage(ImageReader(img1), 300, h - 300, width=3 * inch, height=2 * inch)
 
-    # Insert Matplotlib scatter
+    # insert Matplotlib scatter
     img2 = io.BytesIO()
     fig_sc_mpl.savefig(img2, format="PNG", bbox_inches="tight")
     img2.seek(0)
