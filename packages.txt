@@ -1,15 +1,8 @@
-# packages.txt
-
-# C/C++ build tools for compiling Praat‑Parselmouth
 build-essential
+cmake
 ninja-build
-
-# Audio/video processing
+python3-dev
 ffmpeg
-
-# Font & X11 support for Streamlit’s browser-based UI
-fontconfig
-x11-common
-
-# Pocketsphinx language model (if you’re using SpeechRecognition with pocketsphinx)
-pocketsphinx-en-us
+libsndfile1-dev
+libasound2-dev
+libpocketsphinx-dev
