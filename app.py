@@ -40,7 +40,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     res = model.transcribe(path, language=language)
     transcript = res["text"].strip()
 
-    # Pause detection & MFCCs
+    # Pause detection
     y, sr = librosa.load(path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=25)
     speech_dur = sum((e - s) for s, e in intervals) / sr
@@ -48,7 +48,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     total_pause = total_dur - speech_dur
     num_pauses = max(len(intervals) - 1, 0)
 
-    # MFCC stats just in case
+    # MFCC stats (optional)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
     mfcc_means = mfcc.mean(axis=1)
     mfcc_stds = mfcc.std(axis=1)
@@ -60,13 +60,12 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         "total_pause": total_pause,
         "num_pauses": num_pauses,
     }
-    # add mfcc stats (optional)
     for i in range(13):
         feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
         feats[f"mfcc_{i+1}_std"] = float(mfcc_stds[i])
     return feats
 
-# Clustering + risk scoring (pause‐only)
+# Clustering + risk scoring (pause‐only, safe normalization)
 @st.cache_data(show_spinner=False)
 def score_df(df: pd.DataFrame) -> pd.DataFrame:
     X = df[["total_pause", "num_pauses"]]
@@ -75,14 +74,23 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     df["dbscan_label"] = db.labels_
     df["iso_score"] = iso.decision_function(X)
 
+    # safe normalization
+    pause_max = df.total_pause.max()
+    count_max = df.num_pauses.max()
+    iso_max   = df.iso_score.max()
+
+    df["pause_norm"]  = df.total_pause.apply(lambda v: v / pause_max if pause_max>0 else 0)
+    df["count_norm"]  = df.num_pauses.apply(lambda v: v / count_max if count_max>0 else 0)
+    df["iso_norm"]    = df.iso_score.apply(lambda v: 1 - (v / iso_max) if iso_max>0 else 0).fillna(0)
+
     # weighted risk composite (0–100)
-    w_pause, w_pauses, w_iso = 0.5, 0.3, 0.2
-    r = (
-        (df.total_pause / df.total_pause.max()) * w_pause
-        + (df.num_pauses / df.num_pauses.max()) * w_pauses
-        + (1 - (df.iso_score / df.iso_score.max())) * w_iso
-    )
-    df["risk_score"] = (r * 100).clip(0, 100).round(1)
+    w_pause, w_count, w_iso = 0.5, 0.3, 0.2
+    df["risk_score"] = (
+        df.pause_norm * w_pause +
+        df.count_norm * w_count +
+        df.iso_norm   * w_iso
+    ) * 100
+    df["risk_score"] = df.risk_score.clip(0,100).round(1)
     return df
 
 # Build a one‑page PDF report
@@ -114,47 +122,43 @@ def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
 # --- UI ---
 st.title("📋 MemoTag Cognitive Decline Detection")
 
-# Sidebar settings
+# Sidebar
 st.sidebar.header("Settings")
-language = st.sidebar.selectbox("Transcription Language", ["en", "hi", "fr", "es"], index=0)
-model_name = st.sidebar.selectbox("Whisper Model", ["tiny", "base", "small", "medium", "large"], index=1)
+language   = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
+model_name = st.sidebar.selectbox("Whisper Model",        ["tiny","base","small","medium","large"], index=1)
 if st.sidebar.button("Clear Cache"):
     st.cache_data.clear()
     st.cache_resource.clear()
 
-# File uploader
-files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav", "mp3", "m4a"], accept_multiple_files=True)
+# File upload
+files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
 if not files:
     st.info("Upload at least one audio file to begin.")
     st.stop()
 
-# Extract & score
+# Read bytes once
+audio_bytes_list = [f.read() for f in files]
+
+# Process
 records = []
-for f in files:
-    with st.spinner(f"Processing {f.name}…"):
-        feats = extract_features(f.read(), language, model_name)
-        feats["filename"] = f.name
-        records.append(feats)
+for audio_bytes in audio_bytes_list:
+    with st.spinner("Extracting features…"):
+        feats = extract_features(audio_bytes, language, model_name)
+    records.append(feats)
 
 df = pd.DataFrame(records)
 df = score_df(df)
 
 # Audio playback & description
 st.subheader("🔊 Audio Playback & Description")
-st.audio(files[0].read(), format="audio/wav")
+first_bytes = audio_bytes_list[0]
+st.audio(first_bytes)  # auto MIME detection
 st.markdown("**Verbal Description (Transcript):**")
-st.write(df.loc[0, "transcript"])
+st.write(df.transcript.iloc[0])
 
-# Transposed feature table: metrics ↓, files →
+# Features table
 st.subheader("🔍 Extracted Features & Scores")
-wide_df = df.set_index("filename").T
-fmt = {
-    "total_duration": "{:.2f}",
-    "total_pause":    "{:.2f}",
-    "num_pauses":     "{:.0f}",
-    "risk_score":     "{:.1f}"
-}
-st.dataframe(wide_df.style.format(fmt), use_container_width=True)
+st.dataframe(df, use_container_width=True)
 
 # Scatter plot
 st.subheader("🗺️ Pause vs. Risk Score")
@@ -164,11 +168,9 @@ ax.set_xlabel("Total Pause Duration (s)")
 ax.set_ylabel("Risk Score (0–100)")
 st.pyplot(fig)
 
-# CSV download
+# Downloads
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
-
-# PDF download
 pdf_buf = make_pdf(df, fig)
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
 
@@ -177,17 +179,15 @@ st.subheader("📝 Executive Summary")
 c1, c2 = st.columns(2)
 with c1:
     st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
-    st.markdown(f"- **Num Pauses:** {df.num_pauses.iloc[0]}")
+    st.markdown(f"- **Num Pauses:** {int(df.num_pauses.iloc[0])}")
 with c2:
     st.markdown("**Cognitive Risk Score**")
     st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]}</h1>", unsafe_allow_html=True)
 
-st.markdown(
-    """
+st.markdown("""
 **Next Steps**  
 1. Validate thresholds with clinicians  
 2. Deploy as a REST API endpoint  
 3. Integrate longitudinal tracking dashboard  
 4. Optimize Whisper model for CPU/GPU  
-"""
-)
+""")
