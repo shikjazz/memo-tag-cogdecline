@@ -13,5 +13,4 @@ cmake>=3.24.2
 ninja
 scikit-build
 
-# Voice analysis
-parselmouth==0.4.1
+
