@@ -4,7 +4,6 @@ warnings.filterwarnings("ignore")
 import io
 import tempfile
 import textwrap
-import base64
 
 import streamlit as st
 import whisper
@@ -23,20 +22,8 @@ from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from st_aggrid import AgGrid, GridOptionsBuilder
 
-# --- Page config & theming ---
+# --- Page config ---
 st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
-
-def toggle_theme():
-    st.session_state.dark_mode = not st.session_state.dark_mode
-
-st.sidebar.checkbox("Dark mode", value=st.session_state.dark_mode, on_change=toggle_theme)
-if st.session_state.dark_mode:
-    st.markdown(
-        "<style>body { background-color: #303030; color: #EEE; }</style>",
-        unsafe_allow_html=True
-    )
 
 # --- Whisper model cache ---
 @st.cache_resource(show_spinner=False)
@@ -65,7 +52,7 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         num_pauses = max(len(intervals) - 1, 0)
         speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
-        f0, voiced_flag, _ = librosa.pyin(
+        f0, _, _ = librosa.pyin(
             y,
             fmin=librosa.note_to_hz("C2"),
             fmax=librosa.note_to_hz("C7"),
@@ -137,17 +124,16 @@ def plot_trend(all_dfs):
                   title="Risk Score Over Multiple Sessions")
     st.plotly_chart(fig, use_container_width=True)
 
-# --- Multi‑page PDF builder ---
-def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
+# --- PDF builder ---
+def make_pdf(df, fig_hist: plt.Figure, fig_sc_mpl: plt.Figure, risk_thresh):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     w, h = letter
 
-    # Page 1 – Overview
+    # Page 1 – Overview
     c.setFont("Helvetica-Bold", 18)
     c.drawString(40, h - 40, "MemoTag Cognitive Decline Analysis Report")
-    t = c.beginText(40, h - 80)
-    t.setFont("Helvetica", 11)
+    t = c.beginText(40, h - 80); t.setFont("Helvetica", 11)
     overview = (
         "This application uses Whisper for speech-to-text and librosa for audio analysis "
         "to detect speech pauses and compute a composite risk score. Elevated pauses "
@@ -155,14 +141,12 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
     )
     for line in textwrap.wrap(overview, 100):
         t.textLine(line)
-    c.drawText(t)
-    c.showPage()
+    c.drawText(t); c.showPage()
 
-    # Page 2 – Methodology
+    # Page 2 – Methodology
     c.setFont("Helvetica-Bold", 16)
     c.drawString(40, h - 40, "Methodology")
-    t = c.beginText(40, h - 80)
-    t.setFont("Helvetica", 10)
+    t = c.beginText(40, h - 80); t.setFont("Helvetica", 10)
     steps = [
         ("1. Transcription", "Whisper → text transcript & word count."),
         ("2. VAD & Pause", "librosa.effects.split → speech vs. silence → pause metrics."),
@@ -174,10 +158,9 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
         for ln in textwrap.wrap(body, 90):
             t.textLine("   " + ln)
         t.textLine("")
-    c.drawText(t)
-    c.showPage()
+    c.drawText(t); c.showPage()
 
-    # Page 3 – Results & Figures
+    # Page 3 – Results & Figures
     row = df.iloc[0]
     c.setFont("Helvetica-Bold", 16)
     c.drawString(40, h - 40, "Results & Figures")
@@ -192,24 +175,23 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
     for i, (lbl, val) in enumerate(metrics):
         c.drawString(40, h - 80 - 18 * i, f"{lbl}: {val}")
 
-    # Insert histogram
+    # insert histogram
     img1 = io.BytesIO()
     fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
     img1.seek(0)
     c.drawImage(ImageReader(img1), 300, h - 300, width=3 * inch, height=2 * inch)
 
-    # Insert Matplotlib scatter
+    # insert Matplotlib scatter
     img2 = io.BytesIO()
     fig_sc_mpl.savefig(img2, format="PNG", bbox_inches="tight")
     img2.seek(0)
     c.drawImage(ImageReader(img2), 40, h - 300, width=3 * inch, height=2 * inch)
     c.showPage()
 
-    # Page 4 – Glossary & Future Work
+    # Page 4 – Glossary & Future Work
     c.setFont("Helvetica-Bold", 16)
     c.drawString(40, h - 40, "Glossary & Future Work")
-    t = c.beginText(40, h - 80)
-    t.setFont("Helvetica", 10)
+    t = c.beginText(40, h - 80); t.setFont("Helvetica", 10)
     glossary = [
         ("VAD", "Voice Activity Detection—speech vs. silence."),
         ("MFCC", "Mel‑Frequency Cepstral Coefficients."),
@@ -228,8 +210,7 @@ def make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh):
     ]
     for fw in future:
         t.textLine(f"• {fw}")
-    c.drawText(t)
-    c.showPage()
+    c.drawText(t); c.showPage()
 
     c.save()
     buf.seek(0)
@@ -253,10 +234,8 @@ if not files:
     st.info("👆 Upload at least one file to begin.")
     st.stop()
 
-# Read every upload once into memory
 audio_bytes_list = [f.read() for f in files]
 
-# Extract / score
 records, all_dfs = [], []
 for audio_bytes in audio_bytes_list:
     feats = extract_features(audio_bytes, language, model_name)
@@ -273,17 +252,17 @@ c1.metric("Duration (s)", f"{latest.total_duration:.1f}")
 c2.metric("Speech Rate", f"{latest.speech_rate:.2f} w/s")
 c3.metric("Risk Score (%)", f"{latest.risk_score:.1f}%")
 
-# Trend chart
+# Longitudinal trend
 if len(all_dfs) > 1:
     st.subheader("📈 Longitudinal Trend")
     plot_trend(all_dfs)
 
 # Playback & transcript
 st.subheader("🔊 Playback & Transcript")
-st.audio(audio_bytes_list[0], format="audio/wav")
+st.audio(audio_bytes_list[0])
 st.write(latest.transcript)
 
-# Summary table with AgGrid
+# Interactive summary table
 summary = df[[
     "filename","total_duration","speech_dur","total_pause",
     "num_pauses","speech_rate","pitch_mean","rms","risk_score"
@@ -302,7 +281,7 @@ gb.configure_column(
 )
 AgGrid(summary, gridOptions=gb.build(), enable_enterprise_modules=False)
 
-# Pause histogram & interactive Plotly
+# Pause histogram & Plotly scatter
 st.subheader("📊 Pause Distribution & Risk Mapping")
 fig_hist, axh = plt.subplots()
 y, sr = librosa.load(df.tmp_path.iloc[0], sr=None, mono=True)
@@ -343,6 +322,5 @@ for section in [
 # Downloads
 csv = df.to_csv(index=False).encode("utf-8")
 pdf_buf = make_pdf(df, fig_hist, fig_sc_mpl, risk_thresh)
-
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
