@@ -4,6 +4,7 @@ warnings.filterwarnings("ignore")
 import io
 import tempfile
 import base64
+import textwrap
 
 import streamlit as st
 import whisper
@@ -17,6 +18,7 @@ from sklearn.ensemble import IsolationForest
 import matplotlib.pyplot as plt
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 
 # --- Page config ---
@@ -30,20 +32,19 @@ def load_whisper(model_name="base"):
 # --- Feature extraction (no parselmouth) ---
 @st.cache_data(show_spinner=False)
 def extract_features(audio_bytes: bytes, language: str, model_name: str):
-    # write to temp WAV
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
         seg.export(tmp.name, format="wav")
         path = tmp.name
 
     # 1) ASR
-    model = load_whisper(model_name)
-    res   = model.transcribe(path, language=language)
+    model     = load_whisper(model_name)
+    res       = model.transcribe(path, language=language)
     transcript = res["text"].strip()
-    words = transcript.split()
+    words     = transcript.split()
 
     # 2) VAD via librosa
-    y, sr = librosa.load(path, sr=None, mono=True)
+    y, sr     = librosa.load(path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=25)
     speech_dur  = sum((e - s) for s, e in intervals) / sr
     total_dur   = len(y) / sr
@@ -51,14 +52,14 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
     num_pauses  = max(len(intervals) - 1, 0)
     speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
 
-    # 3) MFCC stats (optional)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    mfcc_means = mfcc.mean(axis=1)
-    mfcc_stds  = mfcc.std(axis=1)
+    # 3) MFCC stats
+    mfcc          = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_means    = mfcc.mean(axis=1)
+    mfcc_stds     = mfcc.std(axis=1)
 
     feats = {
         "filename":       tmp.name.split("/")[-1],
-        "tmp_path":       path,                     # for histogram reuse
+        "tmp_path":       path,
         "transcript":     transcript,
         "total_duration": total_dur,
         "speech_dur":     speech_dur,
@@ -91,24 +92,61 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # --- PDF report builder ---
-def make_pdf(df: pd.DataFrame, fig) -> io.BytesIO:
+def make_pdf(df: pd.DataFrame, fig_hist, fig_scatter, risk_thresh:int) -> io.BytesIO:
     buf = io.BytesIO()
     c   = canvas.Canvas(buf, pagesize=letter)
     w,h = letter
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(30, h-30, "MemoTag Cognitive Decline Report")
 
-    text = c.beginText(30, h-60)
+    # Title
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, h-40, "MemoTag Cognitive Decline Analysis Report")
+
+    # Project Overview
+    text = c.beginText(40, h-70)
     text.setFont("Helvetica", 10)
-    row = df.iloc[0]
-    for k in ("filename","total_duration","speech_dur","total_pause","num_pauses","speech_rate","risk_score"):
-        text.textLine(f"{k}: {row[k]}")
+    overview = (
+        "This report summarizes the analysis of speech pauses extracted "
+        "from the uploaded audio. By leveraging OpenAI's Whisper for "
+        "automatic speech recognition and signal processing via librosa, "
+        "we quantify pausing patterns and compute a composite risk score "
+        "indicative of potential cognitive decline."
+    )
+    for line in textwrap.wrap(overview, width=90):
+        text.textLine(line)
+    text.textLine("")
     c.drawText(text)
 
-    img = io.BytesIO()
-    fig.savefig(img, format="PNG", bbox_inches="tight")
-    img.seek(0)
-    c.drawImage(ImageReader(img), 30, h-350, width=550, preserveAspectRatio=True)
+    # Key Metrics Table
+    row = df.iloc[0]
+    metrics = [
+        ("Total Duration (s)", f"{row.total_duration:.1f}"),
+        ("Speech Duration (s)", f"{row.speech_dur:.1f}"),
+        ("Total Pause (s)",     f"{row.total_pause:.1f}"),
+        ("# Pauses",            f"{int(row.num_pauses)}"),
+        ("Speech Rate (w/s)",   f"{row.speech_rate:.2f}"),
+        ("Risk Score (%)",      f"{row.risk_score:.1f}"),
+        ("Category",            "High Risk" if row.risk_score>=risk_thresh else
+                                "Medium Risk" if row.risk_score>=risk_thresh/2 else
+                                "Low Risk"),
+    ]
+    y0 = h-180
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y0, "Key Metrics:")
+    c.setFont("Helvetica", 10)
+    for i,(label,val) in enumerate(metrics):
+        c.drawString(60, y0 - 15*(i+1), f"{label}: {val}")
+
+    # Embed Histogram
+    img1 = io.BytesIO()
+    fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
+    img1.seek(0)
+    c.drawImage(ImageReader(img1), 40, y0-250, width=3.0*inch, height=2.0*inch)
+
+    # Embed Scatter
+    img2 = io.BytesIO()
+    fig_scatter.savefig(img2, format="PNG", bbox_inches="tight")
+    img2.seek(0)
+    c.drawImage(ImageReader(img2), 340, y0-250, width=3.0*inch, height=2.0*inch)
 
     c.showPage()
     c.save()
@@ -146,8 +184,8 @@ df = score_df(df)
 st.subheader("🏷️ Key Metrics")
 k1,k2,k3 = st.columns(3)
 k1.metric("Total Duration (s)", f"{df.total_duration.iloc[0]:.1f}")
-k2.metric("Speech Rate (w/s)",     f"{df.speech_rate.iloc[0]:.2f}")
-k3.metric("Risk Score (%)",         f"{df.risk_score.iloc[0]:.1f}")
+k2.metric("Speech Rate (w/s)",    f"{df.speech_rate.iloc[0]:.2f}")
+k3.metric("Risk Score (%)",        f"{df.risk_score.iloc[0]:.1f}")
 
 # Playback & transcript
 st.subheader("🔊 Playback & Transcript")
@@ -175,30 +213,45 @@ pause_lengths = [
     (intervals[i][0] - intervals[i-1][1]) / sr
     for i in range(1, len(intervals))
 ]
-fig2, ax2 = plt.subplots(figsize=(6,3))
-ax2.hist(pause_lengths, bins=20, edgecolor="k", alpha=0.7)
-ax2.set_xlabel("Pause Length (s)")
-ax2.set_ylabel("Count")
-st.pyplot(fig2)
+fig_hist, axh = plt.subplots(figsize=(6,3))
+axh.hist(pause_lengths, bins=20, edgecolor="k", alpha=0.7)
+axh.set_xlabel("Pause Length (s)")
+axh.set_ylabel("Count")
+st.pyplot(fig_hist)
 
 # Pause vs Risk scatter
 st.subheader("🗺️ Pause vs. Risk Score")
-fig, ax = plt.subplots(figsize=(6,4))
-colors = ["red" if r>risk_thresh else "green" for r in df.risk_score]
-ax.scatter(df.total_pause, df.risk_score, s=80, c=colors, edgecolor="k", alpha=0.8)
-ax.set_xlabel("Total Pause Duration (s)")
-ax.set_ylabel("Risk Score (%)")
-ax.axhline(risk_thresh, color="gray", linestyle="--", linewidth=1)
-st.pyplot(fig)
+fig_sc, axsc = plt.subplots(figsize=(6,4))
+colors = ["red" if r>=risk_thresh else "green" for r in df.risk_score]
+axsc.scatter(df.total_pause, df.risk_score, s=80, c=colors, edgecolor="k", alpha=0.8)
+axsc.set_xlabel("Total Pause Duration (s)")
+axsc.set_ylabel("Risk Score (%)")
+axsc.axhline(risk_thresh, color="gray", linestyle="--", linewidth=1)
+st.pyplot(fig_sc)
+
+# Detailed Analysis Report section
+st.subheader("📑 Detailed Analysis Report")
+st.markdown(
+    """
+**Project Overview**  
+This analysis uses Whisper to transcribe your audio and librosa to detect speech‐pause intervals.  
+By clustering and applying an isolation forest, we derive a composite *cognitive risk score* that can highlight potential signs of slowed speech or increased pausing—markers often associated with cognitive decline.
+
+**Interpretation**  
+- **High Pause Duration** and **many pauses** → higher risk score  
+- **Speech Rate** (words per second) below typical conversational norms may also indicate slowed cognition  
+- You can adjust the high‐risk threshold in the sidebar to see how your score category (Low/Medium/High) shifts.
+"""  
+)
 
 # Downloads
-csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
+csv     = df.to_csv(index=False).encode("utf-8")
+pdf_buf = make_pdf(df, fig_hist, fig_sc, risk_thresh)
 
-pdf_buf = make_pdf(df, fig)
+st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
 
-# --- Executive summary ---
+# Executive summary
 st.subheader("📝 Executive Summary")
 cat = (
     "High Risk"   if df.risk_score.iloc[0] >= risk_thresh else
