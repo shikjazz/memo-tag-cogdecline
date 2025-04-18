@@ -3,6 +3,7 @@ warnings.filterwarnings("ignore")
 
 import io
 import tempfile
+import base64
 
 import streamlit as st
 import whisper
@@ -151,14 +152,17 @@ df = score_df(df)
 
 # Audio playback & description
 st.subheader("🔊 Audio Playback & Description")
-first_bytes = audio_bytes_list[0]
-st.audio(first_bytes)
+st.audio(audio_bytes_list[0])  # auto MIME detection
 st.markdown("**Verbal Description (Transcript):**")
 st.write(df.transcript.iloc[0])
 
 # Features table
 st.subheader("🔍 Extracted Features & Scores")
 st.dataframe(df, use_container_width=True)
+
+# Transposed table
+st.subheader("🔄 Transposed Feature Table")
+st.table(df.set_index("filename").T)
 
 # Scatter plot
 st.subheader("🗺️ Pause vs. Risk Score")
@@ -168,31 +172,30 @@ ax.set_xlabel("Total Pause Duration (s)")
 ax.set_ylabel("Risk Score (0–100)")
 st.pyplot(fig)
 
-# Downloads
+# Downloads + PDF embed
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
+
 pdf_buf = make_pdf(df, fig)
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
 
-# — Executive summary —
+# Embed PDF preview
+pdf_buf.seek(0)
+b64 = base64.b64encode(pdf_buf.read()).decode("utf-8")
+pdf_html = f'<iframe src="data:application/pdf;base64,{b64}" width="700" height="500" style="border:1px solid #777"></iframe>'
+
+st.subheader("📄 PDF Report Preview")
+st.markdown(pdf_html, unsafe_allow_html=True)
+
+# Executive summary
 st.subheader("📝 Executive Summary")
 c1, c2 = st.columns(2)
-
-# safely extract values
-tp   = df.total_pause.iloc[0]
-npau = df.num_pauses.iloc[0]
-rs   = df.risk_score.iloc[0]
-
-tp_disp   = f"{tp:.1f}s"    if pd.notna(tp)   else "N/A"
-npau_disp = f"{int(npau)}"  if pd.notna(npau) else "N/A"
-rs_disp   = f"{rs:.1f}"     if pd.notna(rs)   else "N/A"
-
 with c1:
-    st.markdown(f"- **Total Pause:**  {tp_disp}")
-    st.markdown(f"- **Num Pauses:**  {npau_disp}")
+    st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
+    st.markdown(f"- **Num Pauses:** {df.num_pauses.iloc[0]:.0f}")
 with c2:
     st.markdown("**Cognitive Risk Score**")
-    st.markdown(f"<h1 style='color:#d6336c'>{rs_disp}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]}</h1>", unsafe_allow_html=True)
 
 st.markdown("""
 **Next Steps**  
