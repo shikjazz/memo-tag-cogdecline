@@ -126,7 +126,9 @@ if st.sidebar.button("Clear Cache"):
 
 # --- Main UI ---
 st.title("📋 MemoTag Cognitive Decline Detection")
-files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
+files = st.file_uploader("Upload audio (wav/mp3/m4a)",
+                         type=["wav","mp3","m4a"],
+                         accept_multiple_files=True)
 if not files:
     st.info("Upload at least one audio file to begin.")
     st.stop()
@@ -166,11 +168,9 @@ st.dataframe(summary, use_container_width=True)
 
 # Pause‑length histogram
 st.subheader("📊 Pause‑Length Distribution")
-# reload the same file
-path = df.tmp_path.iloc[0]
-y, sr = librosa.load(path, sr=None, mono=True)
-intervals = librosa.effects.split(y, top_db=25)
-# compute pauses between intervals
+path       = df.tmp_path.iloc[0]
+y, sr      = librosa.load(path, sr=None, mono=True)
+intervals  = librosa.effects.split(y, top_db=25)
 pause_lengths = [
     (intervals[i][0] - intervals[i-1][1]) / sr
     for i in range(1, len(intervals))
@@ -191,17 +191,14 @@ ax.set_ylabel("Risk Score (%)")
 ax.axhline(risk_thresh, color="gray", linestyle="--", linewidth=1)
 st.pyplot(fig)
 
-# Downloads & PDF preview
+# Downloads
 csv = df.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 
 pdf_buf = make_pdf(df, fig)
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
-b64 = base64.b64encode(pdf_buf.getvalue()).decode("utf-8")
-iframe = f"""<iframe src="data:application/pdf;base64,{b64}" width="100%" height="300px"></iframe>"""
-st.markdown(iframe, unsafe_allow_html=True)
 
-# Executive summary + category
+# --- Executive summary ---
 st.subheader("📝 Executive Summary")
 cat = (
     "High Risk"   if df.risk_score.iloc[0] >= risk_thresh else
@@ -214,7 +211,8 @@ with c1:
     st.markdown(f"- **# Pauses:** {df.num_pauses.iloc[0]}")
 with c2:
     st.markdown("**Cognitive Risk Score**")
-    st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]:.1f}%</h1>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]:.1f}%</h1>",
+                unsafe_allow_html=True)
     st.markdown(f"**Category:** {cat}")
 
 st.markdown("""
