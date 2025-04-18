@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Python: Detect Cognitive Decline",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/detect_cognitive_decline.py",
+        "console": "integratedTerminal",
+        "args": ["--audio-dir", "data/audio_samples"]
+      }
+    ]
+  }
+  
