@@ -1,13 +1,10 @@
-# Core app
 streamlit>=1.44.1,<2.0
+openai-whisper>=20230314
 librosa>=0.11.0,<0.12
 numpy>=1.24.0,<2.3
 pandas>=2.2.0,<3.0
 pydub>=0.25.1,<0.26
 ffmpeg-python>=0.2.0,<0.3
-openai-whisper>=20230314
-matplotlib>=3.5
+matplotlib>=3.5,<4
 scikit-learn>=1.1,<2.0
-reportlab>=4.4
-streamlit-screenshot>=0.0.1
-librosa-display>=0.8.1
+reportlab>=4.4,<5
