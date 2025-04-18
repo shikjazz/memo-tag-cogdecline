@@ -3,8 +3,8 @@ warnings.filterwarnings("ignore")
 
 import io
 import tempfile
-import base64
 import textwrap
+import base64
 
 import streamlit as st
 import whisper
@@ -29,7 +29,7 @@ st.set_page_config(page_title="MemoTag Cognitive Decline", layout="wide")
 def load_whisper(model_name="base"):
     return whisper.load_model(model_name)
 
-# --- Feature extraction (no parselmouth) ---
+# --- Feature extraction ---
 @st.cache_data(show_spinner=False)
 def extract_features(audio_bytes: bytes, language: str, model_name: str):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -37,25 +37,25 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         seg.export(tmp.name, format="wav")
         path = tmp.name
 
-    # 1) ASR
-    model     = load_whisper(model_name)
-    res       = model.transcribe(path, language=language)
+    # Transcription
+    model      = load_whisper(model_name)
+    res        = model.transcribe(path, language=language)
     transcript = res["text"].strip()
-    words     = transcript.split()
+    words      = transcript.split()
 
-    # 2) VAD via librosa
+    # Pause detection
     y, sr     = librosa.load(path, sr=None, mono=True)
     intervals = librosa.effects.split(y, top_db=25)
     speech_dur  = sum((e - s) for s, e in intervals) / sr
     total_dur   = len(y) / sr
     total_pause = total_dur - speech_dur
     num_pauses  = max(len(intervals) - 1, 0)
-    speech_rate = len(words) / speech_dur if speech_dur > 0 else 0.0
+    speech_rate = len(words) / speech_dur if speech_dur>0 else 0.0
 
-    # 3) MFCC stats
-    mfcc          = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    mfcc_means    = mfcc.mean(axis=1)
-    mfcc_stds     = mfcc.std(axis=1)
+    # MFCC summary
+    mfcc       = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_means = mfcc.mean(axis=1)
+    mfcc_stds  = mfcc.std(axis=1)
 
     feats = {
         "filename":       tmp.name.split("/")[-1],
@@ -65,17 +65,17 @@ def extract_features(audio_bytes: bytes, language: str, model_name: str):
         "speech_dur":     speech_dur,
         "total_pause":    total_pause,
         "num_pauses":     num_pauses,
-        "speech_rate":    speech_rate,
+        "speech_rate":    speech_rate
     }
     for i in range(13):
         feats[f"mfcc_{i+1}_mean"] = float(mfcc_means[i])
         feats[f"mfcc_{i+1}_std"]  = float(mfcc_stds[i])
     return feats
 
-# --- Risk scoring ---
+# --- Scoring ---
 @st.cache_data(show_spinner=False)
 def score_df(df: pd.DataFrame) -> pd.DataFrame:
-    X   = df[["total_pause", "num_pauses"]]
+    X   = df[["total_pause","num_pauses"]]
     db  = DBSCAN(eps=0.5, min_samples=2).fit(X)
     iso = IsolationForest(contamination=0.1).fit(X)
     df["dbscan_label"] = db.labels_
@@ -84,71 +84,118 @@ def score_df(df: pd.DataFrame) -> pd.DataFrame:
     pmax, nmax, imax = df.total_pause.max(), df.num_pauses.max(), df.iso_score.max()
     df["pause_norm"] = df.total_pause.apply(lambda v: v/pmax if pmax>0 else 0)
     df["count_norm"] = df.num_pauses.apply(lambda v: v/nmax if nmax>0 else 0)
-    df["iso_norm"]   = df.iso_score.apply(lambda v: 1-(v/imax) if imax>0 else 0).fillna(0)
+    df["iso_norm"]   = df.iso_score.apply(lambda v:1-(v/imax) if imax>0 else 0).fillna(0)
 
-    w1, w2, w3 = 0.5, 0.3, 0.2
-    df["risk_score"] = (df.pause_norm*w1 + df.count_norm*w2 + df.iso_norm*w3) * 100
+    w1,w2,w3 = 0.5,0.3,0.2
+    df["risk_score"] = (df.pause_norm*w1 + df.count_norm*w2 + df.iso_norm*w3)*100
     df["risk_score"] = df.risk_score.clip(0,100).round(1)
     return df
 
-# --- PDF report builder ---
-def make_pdf(df: pd.DataFrame, fig_hist, fig_scatter, risk_thresh:int) -> io.BytesIO:
+# --- Multi‐page PDF builder ---
+def make_pdf(df, fig_hist, fig_scatter, risk_thresh):
     buf = io.BytesIO()
     c   = canvas.Canvas(buf, pagesize=letter)
     w,h = letter
 
-    # Title
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(40, h-40, "MemoTag Cognitive Decline Analysis Report")
+    # --- Page 1: Title & Overview ---
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(40,h-40,"MemoTag Cognitive Decline Analysis Report")
 
-    # Project Overview
-    text = c.beginText(40, h-70)
-    text.setFont("Helvetica", 10)
+    text = c.beginText(40,h-80)
+    text.setFont("Helvetica", 11)
     overview = (
-        "This report summarizes the analysis of speech pauses extracted "
-        "from the uploaded audio. By leveraging OpenAI's Whisper for "
-        "automatic speech recognition and signal processing via librosa, "
-        "we quantify pausing patterns and compute a composite risk score "
-        "indicative of potential cognitive decline."
+        "This application uses OpenAI Whisper for speech transcription "
+        "and librosa for audio analysis to detect speech pauses, "
+        "which are then combined into a composite risk score. "
+        "Elevated pause durations and frequency can be early indicators "
+        "of cognitive decline."
     )
-    for line in textwrap.wrap(overview, width=90):
+    for line in textwrap.wrap(overview,100):
         text.textLine(line)
-    text.textLine("")
     c.drawText(text)
+    c.showPage()
 
-    # Key Metrics Table
+    # --- Page 2: Methodology ---
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40,h-40,"Methodology")
+    text = c.beginText(40,h-80)
+    text.setFont("Helvetica",10)
+    for section,body in [
+        ("1. Transcription", 
+         "Audio is transcribed with Whisper, yielding a text transcript and word count."),
+        ("2. VAD & Pause Detection",
+         "We segment speech vs. silence using librosa.effects.split and compute total pause time, number of pauses."),
+        ("3. Feature Extraction",
+         "MFCC-based spectral features are extracted but not used directly in the risk score."),
+        ("4. Scoring",
+         "A DBSCAN cluster label and Isolation Forest outlier score normalize pause metrics into a 0-100 risk score.")
+    ]:
+        text.textLine(f"{section}:")
+        for line in textwrap.wrap(body,90):
+            text.textLine("   " + line)
+        text.textLine("")
+    c.drawText(text)
+    c.showPage()
+
+    # --- Page 3: Results & Figures ---
     row = df.iloc[0]
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40,h-40,"Results & Figures")
+    # Key metrics box
+    c.setFont("Helvetica",11)
     metrics = [
         ("Total Duration (s)", f"{row.total_duration:.1f}"),
-        ("Speech Duration (s)", f"{row.speech_dur:.1f}"),
-        ("Total Pause (s)",     f"{row.total_pause:.1f}"),
-        ("# Pauses",            f"{int(row.num_pauses)}"),
-        ("Speech Rate (w/s)",   f"{row.speech_rate:.2f}"),
-        ("Risk Score (%)",      f"{row.risk_score:.1f}"),
-        ("Category",            "High Risk" if row.risk_score>=risk_thresh else
-                                "Medium Risk" if row.risk_score>=risk_thresh/2 else
-                                "Low Risk"),
+        ("Speech Rate (w/s)", f"{row.speech_rate:.2f}"),
+        ("Total Pause (s)", f"{row.total_pause:.1f}"),
+        ("# Pauses", f"{int(row.num_pauses)}"),
+        ("Risk Score (%)", f"{row.risk_score:.1f}")
     ]
-    y0 = h-180
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y0, "Key Metrics:")
-    c.setFont("Helvetica", 10)
+    y0 = h-80
     for i,(label,val) in enumerate(metrics):
-        c.drawString(60, y0 - 15*(i+1), f"{label}: {val}")
+        c.drawString(40, y0 - 18*i, f"{label}: {val}")
 
-    # Embed Histogram
+    # Insert histogram
     img1 = io.BytesIO()
     fig_hist.savefig(img1, format="PNG", bbox_inches="tight")
     img1.seek(0)
-    c.drawImage(ImageReader(img1), 40, y0-250, width=3.0*inch, height=2.0*inch)
+    c.drawImage(ImageReader(img1), 300, h-300, width=3.0*inch, height=2.0*inch)
 
-    # Embed Scatter
+    # Insert scatter
     img2 = io.BytesIO()
-    fig_scatter.savefig(img2, format="PNG", bbox_inches="tight")
+    fig_scatter.savefig(img2,format="PNG",bbox_inches="tight")
     img2.seek(0)
-    c.drawImage(ImageReader(img2), 340, y0-250, width=3.0*inch, height=2.0*inch)
-
+    c.drawImage(ImageReader(img2), 40, h-300, width=3.0*inch, height=2.0*inch)
     c.showPage()
+
+    # --- Page 4: Glossary & Future Work ---
+    c.setFont("Helvetica-Bold",16)
+    c.drawString(40,h-40,"Glossary & Future Work")
+    text = c.beginText(40,h-80)
+    text.setFont("Helvetica",10)
+
+    # Glossary
+    text.textLine("Glossary:")
+    for term,definition in [
+        ("VAD","Voice Activity Detection—separating speech vs. silence."),
+        ("MFCC","Mel‐Frequency Cepstral Coefficients—spectral features."),
+        ("DBSCAN","Density‐based clustering algorithm."),
+        ("Isolation Forest","Anomaly detection via random tree isolation.")
+    ]:
+        text.textLine(f" • {term}: {definition}")
+    text.textLine("")
+
+    # Future Work
+    text.textLine("Future Work:")
+    for fw in [
+        "Validate risk thresholds against clinical datasets.",
+        "Incorporate prosodic features (pitch, jitter, shimmer).",
+        "Build longitudinal tracking over multiple sessions.",
+        "Deploy REST API and web dashboard for clinicians."
+    ]:
+        text.textLine(f" • {fw}")
+    c.drawText(text)
+    c.showPage()
+
     c.save()
     buf.seek(0)
     return buf
@@ -156,122 +203,93 @@ def make_pdf(df: pd.DataFrame, fig_hist, fig_scatter, risk_thresh:int) -> io.Byt
 # --- Sidebar settings ---
 st.sidebar.header("Settings")
 language    = st.sidebar.selectbox("Transcription Language", ["en","hi","fr","es"], index=0)
-model_name  = st.sidebar.selectbox("Whisper Model",       ["tiny","base","small","medium","large"], index=1)
+model_name  = st.sidebar.selectbox("Whisper Model", ["tiny","base","small","medium","large"], index=1)
 risk_thresh = st.sidebar.slider("High‑risk threshold (%)", 0, 100, 70)
 if st.sidebar.button("Clear Cache"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
+    st.cache_data.clear(); st.cache_resource.clear()
 
-# --- Main UI ---
+# --- Main ---
 st.title("📋 MemoTag Cognitive Decline Detection")
-files = st.file_uploader("Upload audio (wav/mp3/m4a)",
-                         type=["wav","mp3","m4a"],
-                         accept_multiple_files=True)
+files = st.file_uploader("Upload audio (wav/mp3/m4a)", type=["wav","mp3","m4a"], accept_multiple_files=True)
 if not files:
-    st.info("Upload at least one audio file to begin.")
-    st.stop()
+    st.info("Upload at least one file to begin."); st.stop()
 
 audio_bytes_list = [f.read() for f in files]
-records = []
-for b in audio_bytes_list:
-    with st.spinner("Extracting features…"):
-        records.append(extract_features(b, language, model_name))
-
-df = pd.DataFrame(records)
-df = score_df(df)
+records = [extract_features(b,language,model_name) for b in audio_bytes_list]
+df      = score_df(pd.DataFrame(records))
 
 # KPI cards
 st.subheader("🏷️ Key Metrics")
-k1,k2,k3 = st.columns(3)
-k1.metric("Total Duration (s)", f"{df.total_duration.iloc[0]:.1f}")
-k2.metric("Speech Rate (w/s)",    f"{df.speech_rate.iloc[0]:.2f}")
-k3.metric("Risk Score (%)",        f"{df.risk_score.iloc[0]:.1f}")
+c1,c2,c3 = st.columns(3)
+c1.metric("Duration (s)", f"{df.total_duration.iloc[0]:.1f}")
+c2.metric("Speech Rate",   f"{df.speech_rate.iloc[0]:.2f} w/s")
+c3.metric("Risk Score (%)",f"{df.risk_score.iloc[0]:.1f}")
 
 # Playback & transcript
 st.subheader("🔊 Playback & Transcript")
 st.audio(audio_bytes_list[0])
-st.markdown(f"**Transcript:** {df.transcript.iloc[0]}")
+st.write(df.transcript.iloc[0])
 
-# Clean summary table
-summary = df[[
-    "filename","total_duration","speech_dur",
-    "total_pause","num_pauses","speech_rate","risk_score"
-]].copy()
-summary.columns = [
-    "File","Total (s)","Speech (s)",
-    "Pause (s)","# Pauses","Speech Rate (w/s)","Risk (%)"
-]
+# Summary table
+summary = df[["filename","total_duration","speech_dur","total_pause","num_pauses","speech_rate","risk_score"]].copy()
+summary.columns = ["File","Total","Speech","Pause","# Pauses","Rate","Risk (%)"]
 st.subheader("🔍 Extracted Features & Risk Scores")
 st.dataframe(summary, use_container_width=True)
 
-# Pause‑length histogram
-st.subheader("📊 Pause‑Length Distribution")
-path       = df.tmp_path.iloc[0]
-y, sr      = librosa.load(path, sr=None, mono=True)
-intervals  = librosa.effects.split(y, top_db=25)
-pause_lengths = [
-    (intervals[i][0] - intervals[i-1][1]) / sr
-    for i in range(1, len(intervals))
-]
+# Histogram
+st.subheader("📊 Pause Length Distribution")
 fig_hist, axh = plt.subplots(figsize=(6,3))
-axh.hist(pause_lengths, bins=20, edgecolor="k", alpha=0.7)
-axh.set_xlabel("Pause Length (s)")
-axh.set_ylabel("Count")
+path          = df.tmp_path.iloc[0]
+y,sr          = librosa.load(path, sr=None, mono=True)
+ints          = librosa.effects.split(y, top_db=25)
+pause_lens    = [(ints[i][0]-ints[i-1][1])/sr for i in range(1,len(ints))]
+axh.hist(pause_lens, bins=20, edgecolor="k", alpha=0.7)
+axh.set_xlabel("Pause Length (s)"); axh.set_ylabel("Count")
 st.pyplot(fig_hist)
 
-# Pause vs Risk scatter
+# Scatter
 st.subheader("🗺️ Pause vs. Risk Score")
 fig_sc, axsc = plt.subplots(figsize=(6,4))
-colors = ["red" if r>=risk_thresh else "green" for r in df.risk_score]
-axsc.scatter(df.total_pause, df.risk_score, s=80, c=colors, edgecolor="k", alpha=0.8)
-axsc.set_xlabel("Total Pause Duration (s)")
-axsc.set_ylabel("Risk Score (%)")
-axsc.axhline(risk_thresh, color="gray", linestyle="--", linewidth=1)
+cols = ["red" if r>=risk_thresh else "green" for r in df.risk_score]
+axsc.scatter(df.total_pause, df.risk_score, c=cols, edgecolor="k", s=80, alpha=0.8)
+axsc.axhline(risk_thresh, color="gray", linestyle="--")
+axsc.set_xlabel("Total Pause (s)"); axsc.set_ylabel("Risk (%)")
 st.pyplot(fig_sc)
 
-# Detailed Analysis Report section
+# In‐app Detailed Analysis
 st.subheader("📑 Detailed Analysis Report")
-st.markdown(
-    """
-**Project Overview**  
-This analysis uses Whisper to transcribe your audio and librosa to detect speech‐pause intervals.  
-By clustering and applying an isolation forest, we derive a composite *cognitive risk score* that can highlight potential signs of slowed speech or increased pausing—markers often associated with cognitive decline.
-
-**Interpretation**  
-- **High Pause Duration** and **many pauses** → higher risk score  
-- **Speech Rate** (words per second) below typical conversational norms may also indicate slowed cognition  
-- You can adjust the high‐risk threshold in the sidebar to see how your score category (Low/Medium/High) shifts.
-"""  
-)
+with st.expander("Project Overview"):
+    st.write(
+        "This tool leverages Whisper for transcription and librosa for audio analysis "
+        "to detect speech-pause patterns. Elevated pausing can indicate slowed cognition."
+    )
+with st.expander("Methodology"):
+    st.write(
+        "- **Speech-to-Text:** Whisper\n"
+        "- **Pause Detection:** librosa.effects.split\n"
+        "- **Feature Extraction:** pause metrics, MFCCs\n"
+        "- **Scoring:** DBSCAN + IsolationForest → 0–100 risk"
+    )
+with st.expander("Glossary"):
+    st.write(
+        "**VAD:** Voice Activity Detection\n"
+        "**MFCC:** Mel‑Frequency Cepstral Coefficients\n"
+        "**DBSCAN:** Density-based clustering\n"
+        "**IsolationForest:** Anomaly detection"
+    )
+with st.expander("Results & Figures"):
+    st.write("See above histogram and scatter for pause distribution and risk mapping.")
+with st.expander("Future Work"):
+    st.write(
+        "- Validate against clinical data\n"
+        "- Add prosodic features (pitch/jitter)\n"
+        "- Longitudinal tracking\n"
+        "- Deploy REST API/dashboard"
+    )
 
 # Downloads
 csv     = df.to_csv(index=False).encode("utf-8")
-pdf_buf = make_pdf(df, fig_hist, fig_sc, risk_thresh)
+pdf_buf = make_pdf(df,fig_hist,fig_sc,risk_thresh)
 
 st.download_button("Download CSV", csv, "cognitive_report.csv", "text/csv")
 st.download_button("Download PDF Report", pdf_buf, "cognitive_report.pdf", "application/pdf")
-
-# Executive summary
-st.subheader("📝 Executive Summary")
-cat = (
-    "High Risk"   if df.risk_score.iloc[0] >= risk_thresh else
-    "Medium Risk" if df.risk_score.iloc[0] >= (risk_thresh/2) else
-    "Low Risk"
-)
-c1,c2 = st.columns(2)
-with c1:
-    st.markdown(f"- **Total Pause:** {df.total_pause.iloc[0]:.1f}s")
-    st.markdown(f"- **# Pauses:** {df.num_pauses.iloc[0]}")
-with c2:
-    st.markdown("**Cognitive Risk Score**")
-    st.markdown(f"<h1 style='color:#d6336c'>{df.risk_score.iloc[0]:.1f}%</h1>",
-                unsafe_allow_html=True)
-    st.markdown(f"**Category:** {cat}")
-
-st.markdown("""
-**Next Steps**  
-1. Validate thresholds with clinicians  
-2. Deploy as a REST API endpoint  
-3. Integrate longitudinal tracking dashboard  
-4. Optimize Whisper model for CPU/GPU  
-""")
